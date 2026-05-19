@@ -1,0 +1,3 @@
+[build]
+# poulpy-cpu-avx requires the AVX2 and FMA target features at compile time.
+rustflags = ["-C", "target-feature=+avx2,+fma"]
