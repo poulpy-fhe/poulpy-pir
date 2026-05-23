@@ -10,5 +10,11 @@ poulpy-cpu-ref = { path = "../poulpy/poulpy-cpu-ref", features = ["enable-core"]
 poulpy-cpu-avx = { path = "../poulpy/poulpy-cpu-avx", features = ["enable-avx"] }
 
 [[bench]]
-name = "strict_collapse"
+name = "packing"
+path = "benches/packing/main.rs"
+harness = false
+
+[[bench]]
+name = "poly_eval"
+path = "benches/poly_eval/main.rs"
 harness = false

@@ -1,3 +1,4 @@
+use crate::circuit::AggregateLWE;
 use poulpy_core::layouts::{Base2K, ModuleCoreAlloc, TorusPrecision};
 use poulpy_cpu_ref::FFT64Ref;
 use poulpy_hal::{
@@ -7,7 +8,6 @@ use poulpy_hal::{
         ZnxView, ZnxViewMut,
     },
 };
-use poulpy_pir::circuit::AggregateLWE;
 
 fn run<BE>()
 where

@@ -1,4 +1,5 @@
-use crate::common::{scalar_mut, scalar_ref, vec_mut, vec_ref};
+use crate::circuit::AggregateLWE;
+use crate::tests::common::{scalar_mut, scalar_ref, vec_mut, vec_ref};
 use poulpy_core::{
     EncryptionLayout, GLWEDecrypt, GLWEEncryptSk, GLWEExpandLWEMatrix,
     layouts::{
@@ -22,7 +23,6 @@ use poulpy_hal::{
     },
     source::Source,
 };
-use poulpy_pir::circuit::AggregateLWE;
 use std::time::Instant;
 
 fn run<BE>()
@@ -81,7 +81,7 @@ where
 
     let mut sk_glwe = module.glwe_secret_alloc(rank);
     sk_glwe.fill_ternary_prob(0.5, &mut source_xs);
-    let sk_lwe = module.lwe_secret_from_glwe_secret(&sk_glwe);
+    let sk_lwe = module.lwe_secret_from_glwe_secret(&sk_glwe, Degree(n as u32));
 
     let mut sk_prepared = module.glwe_secret_prepared_alloc_from_infos(&sk_glwe);
     module.glwe_secret_prepare(&mut sk_prepared, &sk_glwe);
