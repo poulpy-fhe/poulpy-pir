@@ -6,10 +6,6 @@
 //! the mask, then benchmark the fixed-mask precompute and online packing phases
 //! separately.
 
-#[path = "../../src/circuit/aggregate.rs"]
-mod aggregate;
-
-use aggregate::AggregateLWE;
 use poulpy_core::{
     EncryptionLayout, GLWEAutomorphismKeyCompressedEncryptSk, GLWEEncryptSk, GLWEExpandLWEMatrix,
     layouts::{
@@ -27,16 +23,16 @@ use poulpy_hal::{
     },
     source::Source,
 };
-use poulpy_pir::packing::{Packing, PackingPrecomputeInfos};
+use poulpy_pir::packing::{Packing, PackingMaskAggregation, PackingPrecomputeInfos};
 use std::{
     hint::black_box,
     time::{Duration, Instant},
 };
 
-const RING_DEGREE: usize = 1024;
-const BASE2K: usize = 12;
-const CT_BITS: usize = 24;
-const KSK_BITS: usize = 36;
+const RING_DEGREE: usize = 2048;
+const BASE2K: usize = 18;
+const CT_BITS: usize = 36;
+const KSK_BITS: usize = 54;
 const PT_BITS: usize = 16;
 const DSIZE: usize = 2;
 const BABY_SIZE: usize = 8;
@@ -138,7 +134,7 @@ impl Setup {
             module
                 .glwe_encrypt_sk_tmp_bytes(&src_infos)
                 .max(module.glwe_expand_lwe_matrix_tmp_bytes(&matrix_infos, &src_infos))
-                .max(module.aggregate_lwe_tmp_bytes(matrix_infos.size()))
+                .max(module.packing_mask_aggregate_tmp_bytes(matrix_infos.size()))
                 .max(module.glwe_automorphism_key_compressed_encrypt_sk_tmp_bytes(&key_infos))
                 .max(module.gglwe_prepare_tmp_bytes(&key_infos))
                 .max(module.pack_keys_precompute_tmp_bytes(&key_infos, &key_infos, BABY_SIZE))
@@ -186,7 +182,7 @@ impl Setup {
 
         let mut lwe_matrix = module.lwe_matrix_alloc_from_infos(&matrix_infos);
         module.glwe_expand_lwe_matrix(&mut lwe_matrix, &src, &mut scratch.borrow());
-        module.aggregate_lwe(
+        module.packing_mask_aggregate(
             &mut aggregate,
             BASE2K,
             lwe_matrix.mask(),

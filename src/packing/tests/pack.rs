@@ -5,8 +5,7 @@
 //! The body accumulator stays in the DFT domain through the whole schedule;
 //! per-step normalizations are deferred to a single IDFT + normalize at the
 //! end. So we verify decryption equality rather than ciphertext byte equality.
-use super::aggregate::AggregateLWE;
-use crate::packing::{Packing, PackingPrecomputeInfos};
+use crate::packing::{Packing, PackingMaskAggregation, PackingPrecomputeInfos};
 use poulpy_core::{
     EncryptionLayout, GLWEAutomorphismKeyCompressedEncryptSk, GLWECompressedEncryptSk, GLWEDecrypt,
     GLWEExpandLWEMatrix, GLWENoise,
@@ -72,7 +71,7 @@ fn run() {
             .max(module.glwe_decrypt_tmp_bytes(&src_infos))
             .max(module.glwe_noise_tmp_bytes(&src_infos))
             .max(module.glwe_expand_lwe_matrix_tmp_bytes(&matrix_infos, &src_infos))
-            .max(module.aggregate_lwe_tmp_bytes(matrix_infos.size()))
+            .max(module.packing_mask_aggregate_tmp_bytes(matrix_infos.size()))
             .max(module.glwe_automorphism_key_compressed_encrypt_sk_tmp_bytes(&key_infos))
             .max(module.gglwe_prepare_tmp_bytes(&key_infos))
             .max(module.pack_keys_precompute_tmp_bytes(&key_infos, &key_infos, baby_size))
@@ -124,7 +123,7 @@ fn run() {
     module.decompress_glwe(&mut src_glwe, &src);
     let mut lwe_matrix = module.lwe_matrix_alloc_from_infos(&matrix_infos);
     module.glwe_expand_lwe_matrix(&mut lwe_matrix, &src_glwe, &mut scratch.borrow());
-    module.aggregate_lwe(
+    module.packing_mask_aggregate(
         &mut aggregate,
         base2k,
         lwe_matrix.mask(),

@@ -13,13 +13,59 @@ use poulpy_core::layouts::{
     compressed::GGLWECompressedToBackendRef,
     prepared::{GGLWEPrepared, GGLWEPreparedVmpPMatRef},
 };
-use poulpy_hal::layouts::{Backend, Module, ScratchArena, VecZnxToBackendRef, ZnxInfos};
+use poulpy_hal::layouts::{
+    Backend, Module, ScratchArena, VecZnxToBackendMut, VecZnxToBackendRef, ZnxInfos,
+};
 
 use crate::packing::{
     PackingKeyPrecomputations, PackingKeyPrecomputationsHelper,
     collapse_precompute::{PackingPrecomputations, PackingPrecomputeInfos},
-    default::PackingDefault,
+    default::{PackingDefault, PackingMaskAggregationDefault},
 };
+
+/// # Safety
+/// Implementations must preserve the mask aggregation semantics documented on
+/// [`crate::packing::PackingMaskAggregation`] and must keep all backend reads/writes
+/// within the provided layouts.
+#[allow(private_bounds)]
+pub unsafe trait PackingMaskAggregationImpl<BE: Backend>: Backend {
+    /// Backend hook for packing-mask aggregation scratch estimation.
+    fn packing_mask_aggregate_tmp_bytes_impl(module: &Module<BE>, size: usize) -> usize;
+
+    /// Backend hook for packing-mask aggregation.
+    fn packing_mask_aggregate_impl<R, A>(
+        module: &Module<BE>,
+        dst: &mut R,
+        base2k: usize,
+        a: &A,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos;
+}
+
+#[allow(private_bounds)]
+unsafe impl<BE: Backend> PackingMaskAggregationImpl<BE> for BE
+where
+    Module<BE>: PackingMaskAggregationDefault<BE>,
+{
+    fn packing_mask_aggregate_tmp_bytes_impl(module: &Module<BE>, size: usize) -> usize {
+        module.packing_mask_aggregate_tmp_bytes_default(size)
+    }
+
+    fn packing_mask_aggregate_impl<R, A>(
+        module: &Module<BE>,
+        dst: &mut R,
+        base2k: usize,
+        a: &A,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos,
+    {
+        module.packing_mask_aggregate_default(dst, base2k, a, scratch);
+    }
+}
 
 /// # Safety
 /// Implementations must satisfy the documented collapse semantics, honor

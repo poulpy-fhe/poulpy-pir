@@ -6,6 +6,7 @@
 //! layers for allocation/precompute, the online hot path, and backend OEP
 //! wiring.
 
+mod aggregate;
 mod api;
 mod bsgs_pack;
 mod collapse_precompute;

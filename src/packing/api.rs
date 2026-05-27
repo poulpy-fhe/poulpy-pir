@@ -13,9 +13,32 @@ use poulpy_core::layouts::{
     compressed::GGLWECompressedToBackendRef,
     prepared::{GGLWEPrepared, GGLWEPreparedVmpPMatRef},
 };
-use poulpy_hal::layouts::{Backend, ScratchArena, VecZnxToBackendRef, ZnxInfos};
+use poulpy_hal::layouts::{
+    Backend, ScratchArena, VecZnxToBackendMut, VecZnxToBackendRef, ZnxInfos,
+};
 
 use crate::packing::collapse_precompute::{PackingPrecomputations, PackingPrecomputeInfos};
+
+/// Aggregates a DB-multiplied LWE mask matrix into the mask layout consumed by packing.
+pub trait PackingMaskAggregation<BE: Backend> {
+    /// Scratch estimate for [`PackingMaskAggregation::packing_mask_aggregate`].
+    fn packing_mask_aggregate_tmp_bytes(&self, size: usize) -> usize;
+
+    /// Aggregates `a` into `dst`.
+    ///
+    /// `a` is the `n x n` LWE mask matrix produced after query expansion and
+    /// database multiplication. `dst` receives the `n` aggregate mask columns
+    /// used by [`Packing::pack_precompute`].
+    fn packing_mask_aggregate<R, A>(
+        &self,
+        dst: &mut R,
+        base2k: usize,
+        a: &A,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos;
+}
 
 /// Accessor for client-key-side packing precomputations.
 ///

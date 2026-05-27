@@ -1,5 +1,4 @@
-use crate::circuit::AggregateLWE;
-use crate::tests::common::{scalar_mut, scalar_ref, vec_mut, vec_ref};
+use crate::packing::PackingMaskAggregation;
 use poulpy_core::{
     EncryptionLayout, GLWEDecrypt, GLWEEncryptSk, GLWEExpandLWEMatrix,
     layouts::{
@@ -29,7 +28,7 @@ fn run<BE>()
 where
     BE: Backend,
     BE::OwnedBuf: HostDataMut + HostDataRef,
-    Module<BE>: AggregateLWE<BE>
+    Module<BE>: PackingMaskAggregation<BE>
         + GLWEDecrypt<BE>
         + GLWEEncryptSk<BE>
         + GLWEExpandLWEMatrix<BE>
@@ -96,7 +95,7 @@ where
         .glwe_encrypt_sk_tmp_bytes(&glwe_infos)
         .max(module.glwe_decrypt_tmp_bytes(&glwe_infos))
         .max(module.glwe_expand_lwe_matrix_tmp_bytes(&matrix_infos, &glwe_infos))
-        .max(module.aggregate_lwe_tmp_bytes(matrix_infos.size()))
+        .max(module.packing_mask_aggregate_tmp_bytes(matrix_infos.size()))
         .max(1 << 20);
     let mut scratch = ScratchOwned::<BE>::alloc(scratch_bytes);
 
@@ -133,106 +132,108 @@ where
         .map(|i| module.galois_element(i as i64))
         .collect::<Vec<_>>();
 
-    let decrypt_and_measure_noise =
-        |aggregate: &VecZnx<BE::OwnedBuf>, scratch: &mut ScratchOwned<BE>| -> (Vec<i64>, f64) {
-            let mut acc_big = module.vec_znx_big_alloc(1, size);
+    let decrypt_and_measure_noise = |aggregate: &VecZnx<BE::OwnedBuf>,
+                                     scratch: &mut ScratchOwned<BE>|
+     -> (Vec<i64>, f64) {
+        let mut acc_big = module.vec_znx_big_alloc(1, size);
+        {
+            let mut acc_big_mut = acc_big.to_backend_mut();
+            let body_ref = VecZnxToBackendRef::<BE>::to_backend_ref(lwe_matrix.body());
+            module.vec_znx_big_from_small_backend(&mut acc_big_mut, 0, &body_ref, 0);
+        }
+
+        let mut svp = module.svp_ppol_alloc(1);
+        let mut acc_dft = module.vec_znx_dft_alloc(1, size);
+        let mut tmp_dft = module.vec_znx_dft_alloc(1, size);
+        let aggregate_ref = VecZnxToBackendRef::<BE>::to_backend_ref(aggregate);
+
+        for col in 0..n {
+            let p = if col < n_half {
+                h_list[col]
+            } else {
+                -h_list[col - n_half]
+            };
+            let mut auto_secret = module.scalar_znx_alloc(1);
             {
-                let mut acc_big_mut = acc_big.to_backend_mut();
-                let body_ref = vec_ref::<BE>(lwe_matrix.body());
-                module.vec_znx_big_from_small_backend(&mut acc_big_mut, 0, &body_ref, 0);
+                let secret_ref = ScalarZnxToBackendRef::<BE>::to_backend_ref(sk_lwe.data());
+                let mut auto_secret_mut =
+                    ScalarZnxToBackendMut::<BE>::to_backend_mut(&mut auto_secret);
+                module.scalar_znx_automorphism_backend(
+                    module.galois_element_inv(p),
+                    &mut auto_secret_mut,
+                    0,
+                    &secret_ref,
+                    0,
+                );
             }
-
-            let mut svp = module.svp_ppol_alloc(1);
-            let mut acc_dft = module.vec_znx_dft_alloc(1, size);
-            let mut tmp_dft = module.vec_znx_dft_alloc(1, size);
-            let aggregate_ref = vec_ref::<BE>(aggregate);
-
-            for col in 0..n {
-                let p = if col < n_half {
-                    h_list[col]
-                } else {
-                    -h_list[col - n_half]
-                };
-                let mut auto_secret = module.scalar_znx_alloc(1);
-                {
-                    let secret_ref = scalar_ref::<BE>(sk_lwe.data());
-                    let mut auto_secret_mut = scalar_mut::<BE>(&mut auto_secret);
-                    module.scalar_znx_automorphism_backend(
-                        module.galois_element_inv(p),
-                        &mut auto_secret_mut,
-                        0,
-                        &secret_ref,
-                        0,
-                    );
-                }
-                {
-                    let mut svp_mut = svp.to_backend_mut();
-                    let auto_secret_ref = scalar_ref::<BE>(&auto_secret);
-                    module.svp_prepare(&mut svp_mut, 0, &auto_secret_ref, 0);
-                }
-                {
-                    let mut tmp_dft_mut = tmp_dft.to_backend_mut();
-                    let svp_ref = svp.to_backend_ref();
-                    module.svp_apply_dft(&mut tmp_dft_mut, 0, &svp_ref, 0, &aggregate_ref, col);
-                }
-                {
-                    let mut acc_dft_mut = acc_dft.to_backend_mut();
-                    let tmp_dft_ref = tmp_dft.to_backend_ref();
-                    module.vec_znx_dft_add_assign(&mut acc_dft_mut, 0, &tmp_dft_ref, 0);
-                }
-            }
-
-            let mut product_big = module.vec_znx_big_alloc(1, size);
             {
-                let mut product_big_mut = product_big.to_backend_mut();
+                let mut svp_mut = svp.to_backend_mut();
+                let auto_secret_ref = ScalarZnxToBackendRef::<BE>::to_backend_ref(&auto_secret);
+                module.svp_prepare(&mut svp_mut, 0, &auto_secret_ref, 0);
+            }
+            {
+                let mut tmp_dft_mut = tmp_dft.to_backend_mut();
+                let svp_ref = svp.to_backend_ref();
+                module.svp_apply_dft(&mut tmp_dft_mut, 0, &svp_ref, 0, &aggregate_ref, col);
+            }
+            {
                 let mut acc_dft_mut = acc_dft.to_backend_mut();
-                module.vec_znx_idft_apply_tmpa(&mut product_big_mut, 0, &mut acc_dft_mut, 0);
+                let tmp_dft_ref = tmp_dft.to_backend_ref();
+                module.vec_znx_dft_add_assign(&mut acc_dft_mut, 0, &tmp_dft_ref, 0);
             }
-            {
-                let product_big_ref = product_big.to_backend_ref();
-                let mut acc_big_mut = acc_big.to_backend_mut();
-                module.vec_znx_big_add_assign(&mut acc_big_mut, 0, &product_big_ref, 0);
-            }
+        }
 
-            let mut decrypted_pt = module.vec_znx_alloc(1, size);
-            {
-                let acc_big_ref = acc_big.to_backend_ref();
-                let mut decrypted_pt_mut = vec_mut::<BE>(&mut decrypted_pt);
-                module.vec_znx_big_normalize(
-                    &mut decrypted_pt_mut,
-                    base2k.as_usize(),
-                    0,
-                    0,
-                    &acc_big_ref,
-                    base2k.as_usize(),
-                    0,
-                    &mut scratch.borrow(),
-                );
-            }
+        let mut product_big = module.vec_znx_big_alloc(1, size);
+        {
+            let mut product_big_mut = product_big.to_backend_mut();
+            let mut acc_dft_mut = acc_dft.to_backend_mut();
+            module.vec_znx_idft_apply_tmpa(&mut product_big_mut, 0, &mut acc_dft_mut, 0);
+        }
+        {
+            let product_big_ref = product_big.to_backend_ref();
+            let mut acc_big_mut = acc_big.to_backend_mut();
+            module.vec_znx_big_add_assign(&mut acc_big_mut, 0, &product_big_ref, 0);
+        }
 
-            let mut decoded = vec![0; n];
-            decrypted_pt.decode_vec_i64(base2k.as_usize(), 0, k_pt.as_usize(), &mut decoded);
+        let mut decrypted_pt = module.vec_znx_alloc(1, size);
+        {
+            let acc_big_ref = acc_big.to_backend_ref();
+            let mut decrypted_pt_mut = VecZnxToBackendMut::<BE>::to_backend_mut(&mut decrypted_pt);
+            module.vec_znx_big_normalize(
+                &mut decrypted_pt_mut,
+                base2k.as_usize(),
+                0,
+                0,
+                &acc_big_ref,
+                base2k.as_usize(),
+                0,
+                &mut scratch.borrow(),
+            );
+        }
 
-            {
-                let plaintext_ref = vec_ref::<BE>(plaintext.data());
-                let mut decrypted_pt_mut = vec_mut::<BE>(&mut decrypted_pt);
-                module.vec_znx_sub_assign_backend(&mut decrypted_pt_mut, 0, &plaintext_ref, 0);
-                module.vec_znx_normalize_assign_backend(
-                    base2k.as_usize(),
-                    &mut decrypted_pt_mut,
-                    0,
-                    &mut scratch.borrow(),
-                );
-            }
-            let noise_log2 = decrypted_pt.stats(base2k.as_usize(), 0).std().log2();
-            (decoded, noise_log2)
-        };
+        let mut decoded = vec![0; n];
+        decrypted_pt.decode_vec_i64(base2k.as_usize(), 0, k_pt.as_usize(), &mut decoded);
+
+        {
+            let plaintext_ref = VecZnxToBackendRef::<BE>::to_backend_ref(plaintext.data());
+            let mut decrypted_pt_mut = VecZnxToBackendMut::<BE>::to_backend_mut(&mut decrypted_pt);
+            module.vec_znx_sub_assign_backend(&mut decrypted_pt_mut, 0, &plaintext_ref, 0);
+            module.vec_znx_normalize_assign_backend(
+                base2k.as_usize(),
+                &mut decrypted_pt_mut,
+                0,
+                &mut scratch.borrow(),
+            );
+        }
+        let noise_log2 = decrypted_pt.stats(base2k.as_usize(), 0).std().log2();
+        (decoded, noise_log2)
+    };
 
     let mut aggregate = module.vec_znx_alloc(n, size);
 
-    print!("start: aggregate_lwe");
+    print!("start: packing_mask_aggregate");
     let now = Instant::now();
-    module.aggregate_lwe(
+    module.packing_mask_aggregate(
         &mut aggregate,
         base2k.as_usize(),
         lwe_matrix.mask(),
@@ -245,6 +246,6 @@ where
 }
 
 #[test]
-fn aggregate_lwe_decrypts_expanded_glwe_ciphertext() {
+fn packing_mask_aggregate_decrypts_expanded_glwe_ciphertext() {
     run::<FFT64Avx>();
 }

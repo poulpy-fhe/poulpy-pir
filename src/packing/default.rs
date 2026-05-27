@@ -19,13 +19,20 @@ use poulpy_hal::{
         VecZnxBigBytesOf, VecZnxBigNormalize, VecZnxBigNormalizeTmpBytes, VecZnxCopyBackend,
         VecZnxDftAddAssign, VecZnxDftAlloc, VecZnxDftApply, VecZnxDftAutomorphism,
         VecZnxDftAutomorphismPlan, VecZnxDftBytesOf, VecZnxDftZero, VecZnxIdftApply,
-        VecZnxIdftApplyTmpBytes, VmpApplyDftToDft, VmpApplyDftToDftTmpBytes,
+        VecZnxIdftApplyTmpBytes, VecZnxRotateAssignBackend, VecZnxRotateAssignTmpBytes,
+        VecZnxRshAssignBackend, VecZnxRshTmpBytes, VecZnxTransposeBackend, VmpApplyDftToDft,
+        VmpApplyDftToDftTmpBytes,
     },
-    layouts::{Backend, GaloisElement, Module, ScratchArena, VecZnx, VecZnxToBackendRef, ZnxInfos},
+    layouts::{
+        Backend, GaloisElement, Module, ScratchArena, VecZnx, VecZnxToBackendMut,
+        VecZnxToBackendRef, ZnxInfos,
+    },
 };
 
 use crate::packing::{
-    PackingKeyPrecomputations, PackingKeyPrecomputationsHelper, bsgs_pack,
+    PackingKeyPrecomputations, PackingKeyPrecomputationsHelper,
+    aggregate::{packing_mask_aggregate_default, packing_mask_aggregate_tmp_bytes_default},
+    bsgs_pack,
     collapse_precompute::{
         PackingPrecomputations, PackingPrecomputeInfos, pack_precompute_alloc_default,
         precompute_sequential_keyswitch_collapse_aggregate_mask,
@@ -37,6 +44,23 @@ use crate::packing::{
         packing_mask_keys_precompute, packing_mask_keys_precompute_tmp_bytes,
     },
 };
+
+#[doc(hidden)]
+pub trait PackingMaskAggregationDefault<BE: Backend> {
+    /// Default scratch estimate for packing-mask aggregation.
+    fn packing_mask_aggregate_tmp_bytes_default(&self, size: usize) -> usize;
+
+    /// Default packing-mask aggregation implementation.
+    fn packing_mask_aggregate_default<R, A>(
+        &self,
+        dst: &mut R,
+        base2k: usize,
+        a: &A,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos;
+}
 
 #[doc(hidden)]
 #[allow(private_bounds)]
@@ -111,6 +135,36 @@ pub trait PackingDefault<BE: Backend> {
         B: VecZnxToBackendRef<BE> + ZnxInfos,
         P: PackingKeyPrecomputationsHelper<BE, K>,
         K: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos;
+}
+
+impl<BE: Backend> PackingMaskAggregationDefault<BE> for Module<BE>
+where
+    Self: VecZnxCopyBackend<BE>
+        + VecZnxTransposeBackend<BE>
+        + VecZnxAutomorphismBackend<BE>
+        + VecZnxAddAssignBackend<BE>
+        + VecZnxRotateAssignBackend<BE>
+        + VecZnxRotateAssignTmpBytes
+        + VecZnxRshAssignBackend<BE>
+        + VecZnxRshTmpBytes
+        + GaloisElement,
+{
+    fn packing_mask_aggregate_tmp_bytes_default(&self, size: usize) -> usize {
+        packing_mask_aggregate_tmp_bytes_default(self, size)
+    }
+
+    fn packing_mask_aggregate_default<R, A>(
+        &self,
+        dst: &mut R,
+        base2k: usize,
+        a: &A,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos,
+    {
+        packing_mask_aggregate_default(self, dst, base2k, a, scratch);
+    }
 }
 
 impl<BE: Backend> PackingDefault<BE> for Module<BE>

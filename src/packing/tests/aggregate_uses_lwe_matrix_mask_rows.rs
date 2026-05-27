@@ -1,4 +1,4 @@
-use crate::circuit::AggregateLWE;
+use crate::packing::PackingMaskAggregation;
 use poulpy_core::layouts::{Base2K, ModuleCoreAlloc, TorusPrecision};
 use poulpy_cpu_ref::FFT64Ref;
 use poulpy_hal::{
@@ -13,7 +13,8 @@ fn run<BE>()
 where
     BE: Backend,
     BE::OwnedBuf: HostDataMut + HostDataRef,
-    Module<BE>: AggregateLWE<BE> + ModuleCoreAlloc<OwnedBuf = BE::OwnedBuf> + ModuleNew<BE>,
+    Module<BE>:
+        PackingMaskAggregation<BE> + ModuleCoreAlloc<OwnedBuf = BE::OwnedBuf> + ModuleNew<BE>,
     VecZnx<BE::OwnedBuf>: VecZnxToBackendMut<BE>,
 {
     let n = 1024usize;
@@ -25,7 +26,7 @@ where
     let mut lhs = module.vec_znx_alloc(n, size);
     let mut rhs = module.vec_znx_alloc(n, size);
     let mut changed = module.vec_znx_alloc(n, size);
-    let mut scratch = ScratchOwned::<BE>::alloc(module.aggregate_lwe_tmp_bytes(size));
+    let mut scratch = ScratchOwned::<BE>::alloc(module.packing_mask_aggregate_tmp_bytes(size));
 
     for row in 0..n {
         lwe_matrix.body_mut().at_mut(0, 0)[row] = 100 + row as i64;
@@ -37,7 +38,7 @@ where
         }
     }
 
-    module.aggregate_lwe(
+    module.packing_mask_aggregate(
         &mut lhs,
         base2k.as_usize(),
         lwe_matrix.mask(),
@@ -46,7 +47,7 @@ where
     for row in 0..n {
         lwe_matrix.body_mut().at_mut(0, 0)[row] += 1_000;
     }
-    module.aggregate_lwe(
+    module.packing_mask_aggregate(
         &mut rhs,
         base2k.as_usize(),
         lwe_matrix.mask(),
@@ -55,7 +56,7 @@ where
 
     let changed_limb = size - 1;
     lwe_matrix.mask_mut().at_mut(2, changed_limb)[1] += 4096;
-    module.aggregate_lwe(
+    module.packing_mask_aggregate(
         &mut changed,
         base2k.as_usize(),
         lwe_matrix.mask(),
@@ -70,6 +71,6 @@ where
 }
 
 #[test]
-fn aggregate_lwe_uses_lwe_matrix_mask_rows() {
+fn packing_mask_aggregate_uses_lwe_matrix_mask_rows() {
     run::<FFT64Ref>();
 }

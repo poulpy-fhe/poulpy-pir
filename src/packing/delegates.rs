@@ -8,13 +8,37 @@ use poulpy_core::layouts::{
     compressed::GGLWECompressedToBackendRef,
     prepared::{GGLWEPrepared, GGLWEPreparedVmpPMatRef},
 };
-use poulpy_hal::layouts::{Backend, Module, ScratchArena, VecZnxToBackendRef, ZnxInfos};
+use poulpy_hal::layouts::{
+    Backend, Module, ScratchArena, VecZnxToBackendMut, VecZnxToBackendRef, ZnxInfos,
+};
 
 use crate::packing::{
-    Packing, PackingKeyPrecomputations, PackingKeyPrecomputationsHelper,
+    Packing, PackingKeyPrecomputations, PackingKeyPrecomputationsHelper, PackingMaskAggregation,
     collapse_precompute::{PackingPrecomputations, PackingPrecomputeInfos},
-    oep::PackingImpl,
+    oep::{PackingImpl, PackingMaskAggregationImpl},
 };
+
+impl<BE> PackingMaskAggregation<BE> for Module<BE>
+where
+    BE: Backend + PackingMaskAggregationImpl<BE>,
+{
+    fn packing_mask_aggregate_tmp_bytes(&self, size: usize) -> usize {
+        BE::packing_mask_aggregate_tmp_bytes_impl(self, size)
+    }
+
+    fn packing_mask_aggregate<R, A>(
+        &self,
+        dst: &mut R,
+        base2k: usize,
+        a: &A,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos,
+    {
+        BE::packing_mask_aggregate_impl(self, dst, base2k, a, scratch);
+    }
+}
 
 impl<BE> Packing<BE> for Module<BE>
 where

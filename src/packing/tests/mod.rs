@@ -1,4 +1,3 @@
-#[path = "../../circuit/aggregate.rs"]
-pub(crate) mod aggregate;
-
+mod aggregate_decrypts_expanded_glwe_ciphertext;
+mod aggregate_uses_lwe_matrix_mask_rows;
 mod pack;

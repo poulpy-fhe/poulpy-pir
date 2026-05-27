@@ -1,4 +1,4 @@
-use crate::circuit::AggregateLWE;
+use crate::packing::PackingMaskAggregation;
 use crate::encoding::{U256_BASE65535_DIGITS, encode_u256_base65535};
 use crate::interpolation::{interpolate_columns, interpolate_tmp_bytes};
 use poulpy_core::{
@@ -441,7 +441,7 @@ impl<BE: Backend> Database<BE> {
 
     pub fn preprocess_query_mask_tmp_bytes<Q>(&self, module: &Module<BE>, query: &Q) -> usize
     where
-        Module<BE>: AggregateLWE<BE> + GLWEExpandLWEMatrix<BE> + LWEMatrixMul<BE>,
+        Module<BE>: PackingMaskAggregation<BE> + GLWEExpandLWEMatrix<BE> + LWEMatrixMul<BE>,
         Q: GLWEInfos,
     {
         let mask_infos = LWEMatrixLayout {
@@ -463,7 +463,7 @@ impl<BE: Backend> Database<BE> {
                 let mask_mul_bytes = module.lwe_matrix_mul_tmp_bytes(res, u, &mask_infos);
                 let aggregate_bytes =
                     VecZnx::<Vec<u8>>::bytes_of(module.n(), module.n(), mask_product_size)
-                        + module.aggregate_lwe_tmp_bytes(mask_product_size);
+                        + module.packing_mask_aggregate_tmp_bytes(mask_product_size);
                 default_mask_bytes.max(mask_mul_bytes).max(aggregate_bytes)
             }
             _ => default_mask_bytes,
@@ -482,7 +482,7 @@ impl<BE: Backend> Database<BE> {
         query_infos: &Q,
         scratch: &mut ScratchArena<'_, BE>,
     ) where
-        Module<BE>: AggregateLWE<BE>
+        Module<BE>: PackingMaskAggregation<BE>
             + GLWEExpandLWEMatrix<BE>
             + LWEMatrixMul<BE>
             + VecZnxAddAssignBackend<BE>
@@ -512,7 +512,7 @@ impl<BE: Backend> Database<BE> {
                 let u = &self.db[matrix * blocks + b];
                 module.lwe_matrix_mul(&mut mask_product, u, &default_mask, scratch);
                 // First block initializes the result mask; later blocks add in.
-                aggregate_lwe_mask(
+                aggregate_packing_mask(
                     module,
                     &mut self.precomp[matrix],
                     &mask_product,
@@ -560,7 +560,7 @@ impl<BE: Backend> Database<BE> {
 
     pub fn query_tmp_bytes<Q>(&self, module: &Module<BE>, query: &Q) -> usize
     where
-        Module<BE>: AggregateLWE<BE> + GLWEExpandLWEMatrix<BE> + LWEMatrixMul<BE>,
+        Module<BE>: PackingMaskAggregation<BE> + GLWEExpandLWEMatrix<BE> + LWEMatrixMul<BE>,
         Q: GLWEInfos,
     {
         let mask_bytes = self.preprocess_query_mask_tmp_bytes(module, query);
@@ -585,7 +585,7 @@ impl<BE: Backend> Database<BE> {
         scratch: &mut ScratchArena<'_, BE>,
     ) -> &[LWEMatrix<BE::OwnedBuf>]
     where
-        Module<BE>: AggregateLWE<BE>
+        Module<BE>: PackingMaskAggregation<BE>
             + GLWEExpandLWEMatrix<BE>
             + LWEMatrixMul<BE>
             + VecZnxAddAssignBackend<BE>
@@ -615,7 +615,7 @@ impl<BE: Backend> Database<BE> {
     /// Scratch bytes required by [`Database::query_interpolate`].
     pub fn query_interpolate_tmp_bytes<Q>(&self, module: &Module<BE>, query: &Q) -> usize
     where
-        Module<BE>: AggregateLWE<BE> + GLWEExpandLWEMatrix<BE> + LWEMatrixMul<BE>,
+        Module<BE>: PackingMaskAggregation<BE> + GLWEExpandLWEMatrix<BE> + LWEMatrixMul<BE>,
         Q: GLWEInfos,
     {
         let query_bytes = self.query_tmp_bytes(module, query);
@@ -651,7 +651,7 @@ impl<BE: Backend> Database<BE> {
         scratch: &mut ScratchArena<'_, BE>,
     ) -> &[LWEMatrix<BE::OwnedBuf>]
     where
-        Module<BE>: AggregateLWE<BE>
+        Module<BE>: PackingMaskAggregation<BE>
             + GLWEExpandLWEMatrix<BE>
             + LWEMatrixMul<BE>
             + VecZnxAddAssignBackend<BE>
@@ -699,7 +699,7 @@ impl<BE: Backend> Database<BE> {
     ) -> &[LWEMatrix<BE::OwnedBuf>]
     where
         BE: Backend<OwnedBuf = Vec<u8>>,
-        Module<BE>: AggregateLWE<BE>
+        Module<BE>: PackingMaskAggregation<BE>
             + GLWEExpandLWEMatrix<BE>
             + LWEMatrixMul<BE>
             + VecZnxAddAssignBackend<BE>
@@ -725,7 +725,7 @@ impl<BE: Backend> Database<BE> {
     ) -> &[LWEMatrix<BE::OwnedBuf>]
     where
         BE: Backend<OwnedBuf = Vec<u8>>,
-        Module<BE>: AggregateLWE<BE>
+        Module<BE>: PackingMaskAggregation<BE>
             + GLWEExpandLWEMatrix<BE>
             + LWEMatrixMul<BE>
             + VecZnxAddAssignBackend<BE>
@@ -912,7 +912,7 @@ pub fn fill_default_query_mask<BE, R, G>(
 /// Aggregates `src.mask` (LWE dim `r·n`) down to `n` columns and either writes
 /// it to `dst.mask` (`accumulate = false`) or adds it in (`accumulate = true`).
 /// Used to sum per-block mask contributions in [`Database::preprocess_query_mask`].
-fn aggregate_lwe_mask<BE>(
+fn aggregate_packing_mask<BE>(
     module: &Module<BE>,
     dst: &mut LWEMatrix<BE::OwnedBuf>,
     src: &LWEMatrix<BE::OwnedBuf>,
@@ -920,14 +920,14 @@ fn aggregate_lwe_mask<BE>(
     scratch: &mut ScratchArena<'_, BE>,
 ) where
     BE: Backend,
-    Module<BE>: AggregateLWE<BE> + VecZnxAddAssignBackend<BE> + VecZnxCopyBackend<BE>,
+    Module<BE>: PackingMaskAggregation<BE> + VecZnxAddAssignBackend<BE> + VecZnxCopyBackend<BE>,
 {
     let n = module.n();
     let size = src.mask().size();
 
     let (mut aggregate, mut arena_1) = scratch.borrow().take_vec_znx_scratch(n, n, size);
 
-    module.aggregate_lwe(
+    module.packing_mask_aggregate(
         &mut aggregate,
         src.base2k().as_usize(),
         src.mask(),
