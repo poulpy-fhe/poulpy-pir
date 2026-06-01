@@ -24,7 +24,7 @@ fn select_mut<T>(value: &mut T) -> &mut T {
 /// Each `y_k` carries `cols` independent channels. Interpolating them one column
 /// at a time over the *same* slice must recover each channel exactly, proving the
 /// column-local bit-reversal does not corrupt neighbouring columns. This is the
-/// property `Database::query_interpolate` relies on when it interpolates every
+/// property `Interpolation::prepare` relies on when it interpolates every
 /// mask column of a shared `LWEMatrix`.
 fn run<BE>()
 where

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+getrandom = "0.4"
 poulpy-core = { path = "../poulpy/poulpy-core" }
 poulpy-hal = { path = "../poulpy/poulpy-hal" }
 poulpy-cpu-ref = { path = "../poulpy/poulpy-cpu-ref", features = ["enable-core"] }

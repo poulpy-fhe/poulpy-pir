@@ -91,9 +91,7 @@ struct Setup {
     aggregate: poulpy_hal::layouts::VecZnx<<FFT64Avx as Backend>::OwnedBuf>,
     lwe_matrix: poulpy_core::layouts::LWEMatrix<<FFT64Avx as Backend>::OwnedBuf>,
     key_g: GLWEAutomorphismKeyCompressed<<FFT64Avx as Backend>::OwnedBuf>,
-    key_precomputations: poulpy_pir::packing::PackingKeyPrecomputations<
-        poulpy_core::layouts::prepared::GGLWEPrepared<<FFT64Avx as Backend>::OwnedBuf, FFT64Avx>,
-    >,
+    key_precomputations: poulpy_pir::packing::PackingKeys<FFT64Avx>,
     precompute: poulpy_pir::packing::PackingPrecomputations<FFT64Avx>,
     packed: poulpy_core::layouts::GLWE<<FFT64Avx as Backend>::OwnedBuf>,
 }
@@ -134,7 +132,7 @@ impl Setup {
             module
                 .glwe_encrypt_sk_tmp_bytes(&src_infos)
                 .max(module.glwe_expand_lwe_matrix_tmp_bytes(&matrix_infos, &src_infos))
-                .max(module.packing_mask_aggregate_tmp_bytes(matrix_infos.size()))
+                .max(module.packing_mask_preprocessing_tmp_bytes(matrix_infos.size()))
                 .max(module.glwe_automorphism_key_compressed_encrypt_sk_tmp_bytes(&key_infos))
                 .max(module.gglwe_prepare_tmp_bytes(&key_infos))
                 .max(module.pack_keys_precompute_tmp_bytes(&key_infos, &key_infos, BABY_SIZE))
@@ -182,7 +180,7 @@ impl Setup {
 
         let mut lwe_matrix = module.lwe_matrix_alloc_from_infos(&matrix_infos);
         module.glwe_expand_lwe_matrix(&mut lwe_matrix, &src, &mut scratch.borrow());
-        module.packing_mask_aggregate(
+        module.packing_mask_preprocessing(
             &mut aggregate,
             BASE2K,
             lwe_matrix.mask(),

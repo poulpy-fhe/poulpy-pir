@@ -26,7 +26,7 @@ where
     let mut lhs = module.vec_znx_alloc(n, size);
     let mut rhs = module.vec_znx_alloc(n, size);
     let mut changed = module.vec_znx_alloc(n, size);
-    let mut scratch = ScratchOwned::<BE>::alloc(module.packing_mask_aggregate_tmp_bytes(size));
+    let mut scratch = ScratchOwned::<BE>::alloc(module.packing_mask_preprocessing_tmp_bytes(size));
 
     for row in 0..n {
         lwe_matrix.body_mut().at_mut(0, 0)[row] = 100 + row as i64;
@@ -38,7 +38,7 @@ where
         }
     }
 
-    module.packing_mask_aggregate(
+    module.packing_mask_preprocessing(
         &mut lhs,
         base2k.as_usize(),
         lwe_matrix.mask(),
@@ -47,7 +47,7 @@ where
     for row in 0..n {
         lwe_matrix.body_mut().at_mut(0, 0)[row] += 1_000;
     }
-    module.packing_mask_aggregate(
+    module.packing_mask_preprocessing(
         &mut rhs,
         base2k.as_usize(),
         lwe_matrix.mask(),
@@ -56,7 +56,7 @@ where
 
     let changed_limb = size - 1;
     lwe_matrix.mask_mut().at_mut(2, changed_limb)[1] += 4096;
-    module.packing_mask_aggregate(
+    module.packing_mask_preprocessing(
         &mut changed,
         base2k.as_usize(),
         lwe_matrix.mask(),
@@ -71,6 +71,6 @@ where
 }
 
 #[test]
-fn packing_mask_aggregate_uses_lwe_matrix_mask_rows() {
+fn packing_mask_preprocessing_uses_lwe_matrix_mask_rows() {
     run::<FFT64Ref>();
 }

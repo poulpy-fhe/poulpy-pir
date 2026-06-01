@@ -14,7 +14,8 @@ use poulpy_hal::{
         ModuleN, ScratchArenaTakeBasic, VecZnxAddAssignBackend, VecZnxAutomorphismBackend,
         VecZnxBigBytesOf, VecZnxBigNormalize, VecZnxBigNormalizeTmpBytes, VecZnxCopyBackend,
         VecZnxDftAlloc, VecZnxDftApply, VecZnxDftAutomorphismPlan, VecZnxDftBytesOf,
-        VecZnxIdftApply, VecZnxIdftApplyTmpBytes, VmpApplyDftToDft, VmpApplyDftToDftTmpBytes,
+        VecZnxIdftApply, VecZnxIdftApplyTmpBytes, VecZnxNormalize, VmpApplyDftToDft,
+        VmpApplyDftToDftTmpBytes,
     },
     layouts::{
         Backend, GaloisElement, Module, ScratchArena, VecZnx, VecZnxBigToBackendMut,
@@ -22,6 +23,8 @@ use poulpy_hal::{
         VecZnxToBackendMut, VecZnxToBackendRef, ZnxInfos,
     },
 };
+
+const PACK_PRECOMPUTE_ARITHMETIC_BASE2K: usize = 50;
 
 /// Shape metadata for fixed mask-side packing precomputations.
 ///
@@ -71,6 +74,20 @@ impl PackingPrecomputeInfos {
     pub fn baby_size(self) -> usize {
         self.baby_size
     }
+}
+
+/// Metadata used by the coefficient-domain fixed-mask precompute arithmetic.
+///
+/// The online packing layout remains at the caller-requested base. The purely
+/// offline VecZnx arithmetic can use a wider base while still satisfying the
+/// FFT input bound of the current fixed-mask VMP path.
+pub(crate) fn arithmetic_precompute_metadata(
+    metadata: PackingPrecomputeInfos,
+) -> PackingPrecomputeInfos {
+    let base2k = PACK_PRECOMPUTE_ARITHMETIC_BASE2K.max(metadata.base2k);
+    let torus_bits = metadata.size * metadata.base2k;
+    let size = torus_bits.div_ceil(base2k).max(1);
+    PackingPrecomputeInfos::new(metadata.steps, size, base2k, metadata.baby_size)
 }
 
 /// Fixed mask-side state produced before online packing.
@@ -238,20 +255,16 @@ pub(crate) fn pack_precompute_alloc_default<BE: Backend>(
     }
 }
 
-/// Scratch estimate for [`precompute_sequential_keyswitch_collapse_aggregate_mask`].
-///
-/// This covers the coefficient-domain phase of the fixed-mask precompute. The
-/// public [`Packing::pack_precompute`](crate::packing::Packing::pack_precompute)
-/// scratch estimate combines this with the DFT-hot BSGS phase.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn precompute_sequential_keyswitch_collapse_aggregate_mask_tmp_bytes<
+/// Scratch estimate for the coefficient-domain fixed-mask precompute when the
+/// work buffers use a different base/size than the input aggregate layout.
+pub(crate) fn precompute_sequential_keyswitch_collapse_aggregate_mask_tmp_bytes_for_size<
     BE,
-    A,
     KGMask,
     KHMask,
 >(
     module: &Module<BE>,
-    aggregate_mask: &A,
+    aggregate_size: usize,
+    vmp_input_size: usize,
     key_g_mask: &KGMask,
     key_h_mask: &KHMask,
 ) -> usize
@@ -262,20 +275,26 @@ where
         + VecZnxDftBytesOf
         + VecZnxIdftApplyTmpBytes
         + VmpApplyDftToDftTmpBytes,
-    A: ZnxInfos,
     KGMask: GGLWEInfos,
     KHMask: GGLWEInfos,
 {
     let n = module.n();
     let half = n >> 1;
-    let size = aggregate_mask.size();
+    let size = aggregate_size;
     let align = |len: usize| len.next_multiple_of(BE::SCRATCH_ALIGN);
     let vec_scratch = align(VecZnx::<Vec<u8>>::bytes_of(n, half, size))
-        + 4 * align(VecZnx::<Vec<u8>>::bytes_of(n, 1, size));
-    let key_g_scratch =
-        fixed_mask_1x1_vmp_body_addend_tmp_bytes::<BE, _, _, _>(module, aggregate_mask, key_g_mask);
-    let key_h_scratch =
-        fixed_mask_1x1_vmp_body_addend_tmp_bytes::<BE, _, _, _>(module, aggregate_mask, key_h_mask);
+        + 4 * align(VecZnx::<Vec<u8>>::bytes_of(n, 1, size))
+        + align(VecZnx::<Vec<u8>>::bytes_of(n, 1, vmp_input_size));
+    let key_g_scratch = fixed_mask_1x1_vmp_body_addend_tmp_bytes_for_size::<BE, _>(
+        module,
+        vmp_input_size,
+        key_g_mask,
+    );
+    let key_h_scratch = fixed_mask_1x1_vmp_body_addend_tmp_bytes_for_size::<BE, _>(
+        module,
+        vmp_input_size,
+        key_h_mask,
+    );
 
     vec_scratch + key_g_scratch.max(key_h_scratch)
 }
@@ -313,6 +332,8 @@ pub(crate) fn precompute_sequential_keyswitch_collapse_aggregate_mask<BE, A, KGM
     module: &Module<BE>,
     precompute: &mut PackingPrecomputations<BE>,
     aggregate_mask: &A,
+    vmp_input_base2k: usize,
+    vmp_input_size: usize,
     key_g_mask: &KGMask,
     key_h_mask: &KHMask,
     scratch: &mut ScratchArena<'_, BE>,
@@ -327,6 +348,7 @@ pub(crate) fn precompute_sequential_keyswitch_collapse_aggregate_mask<BE, A, KGM
         + VecZnxDftApply<BE>
         + VecZnxDftBytesOf
         + VecZnxIdftApply<BE>
+        + VecZnxNormalize<BE>
         + VmpApplyDftToDft<BE>,
     A: VecZnxToBackendRef<BE> + ZnxInfos,
     KGMask: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos,
@@ -344,8 +366,10 @@ pub(crate) fn precompute_sequential_keyswitch_collapse_aggregate_mask<BE, A, KGM
         scratch_local.take_vec_znx_scratch(n, 1, aggregate_mask.size());
     let (mut mask_addend, scratch_local) =
         scratch_local.take_vec_znx_scratch(n, 1, aggregate_mask.size());
-    let (mut mask_addend_auto, mut scratch_local) =
+    let (mut mask_addend_auto, scratch_local) =
         scratch_local.take_vec_znx_scratch(n, 1, aggregate_mask.size());
+    let (mut term_mask_vmp, mut scratch_local) =
+        scratch_local.take_vec_znx_scratch(n, 1, vmp_input_size);
 
     let aggregate_ref = aggregate_mask.to_backend_ref();
     let mut step = 0usize;
@@ -357,8 +381,10 @@ pub(crate) fn precompute_sequential_keyswitch_collapse_aggregate_mask<BE, A, KGM
         &mut half_work,
         false,
         key_g_mask,
+        vmp_input_base2k,
         &mut step,
         &mut term_mask,
+        &mut term_mask_vmp,
         &mut mask_addend,
         &mut mask_addend_auto,
         &mut scratch_local,
@@ -377,8 +403,10 @@ pub(crate) fn precompute_sequential_keyswitch_collapse_aggregate_mask<BE, A, KGM
         &mut half_work,
         true,
         key_g_mask,
+        vmp_input_base2k,
         &mut step,
         &mut term_mask,
+        &mut term_mask_vmp,
         &mut mask_addend,
         &mut mask_addend_auto,
         &mut scratch_local,
@@ -390,11 +418,19 @@ pub(crate) fn precompute_sequential_keyswitch_collapse_aggregate_mask<BE, A, KGM
         module.vec_znx_copy_backend(&mut term_mut, 0, &half_ref, 0);
     }
     store_body_vmp_mask(module, precompute, step, &term_mask);
+    normalize_term_for_vmp(
+        module,
+        &mut term_mask_vmp,
+        vmp_input_base2k,
+        &term_mask,
+        precompute.base2k(),
+        &mut scratch_local.borrow(),
+    );
     fixed_mask_1x1_vmp_body_addend(
         module,
         &mut mask_addend,
         precompute.base2k(),
-        &term_mask,
+        &term_mask_vmp,
         0,
         key_h_mask,
         &mut scratch_local.borrow(),
@@ -459,14 +495,16 @@ fn store_body_vmp_mask<BE, A>(
 /// body product, computes the corresponding mask-key product offline, applies
 /// the inverse automorphism, and folds it into the current mask state.
 #[allow(clippy::too_many_arguments)]
-fn precompute_collapse_half<BE, Mask, TermMask, MaskAddend, MaskAddendAuto, KMask>(
+fn precompute_collapse_half<BE, Mask, TermMask, TermMaskVmp, MaskAddend, MaskAddendAuto, KMask>(
     module: &Module<BE>,
     precompute: &mut PackingPrecomputations<BE>,
     mask: &mut Mask,
     use_tau_h: bool,
     key_mask: &KMask,
+    vmp_input_base2k: usize,
     step: &mut usize,
     term_mask: &mut TermMask,
+    term_mask_vmp: &mut TermMaskVmp,
     mask_addend: &mut MaskAddend,
     mask_addend_auto: &mut MaskAddendAuto,
     scratch: &mut ScratchArena<'_, BE>,
@@ -481,9 +519,11 @@ fn precompute_collapse_half<BE, Mask, TermMask, MaskAddend, MaskAddendAuto, KMas
         + VecZnxDftApply<BE>
         + VecZnxDftBytesOf
         + VecZnxIdftApply<BE>
+        + VecZnxNormalize<BE>
         + VmpApplyDftToDft<BE>,
     Mask: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE> + ZnxInfos,
     TermMask: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE> + ZnxInfos,
+    TermMaskVmp: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE> + ZnxInfos,
     MaskAddend: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE> + ZnxInfos,
     MaskAddendAuto: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE> + ZnxInfos,
     KMask: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos,
@@ -506,12 +546,20 @@ fn precompute_collapse_half<BE, Mask, TermMask, MaskAddend, MaskAddendAuto, KMas
             source_col,
         );
         store_body_vmp_mask(module, precompute, *step, term_mask);
+        normalize_term_for_vmp(
+            module,
+            term_mask_vmp,
+            vmp_input_base2k,
+            term_mask,
+            precompute.base2k(),
+            scratch,
+        );
 
         fixed_mask_1x1_vmp_body_addend(
             module,
             mask_addend,
             precompute.base2k(),
-            term_mask,
+            term_mask_vmp,
             0,
             key_mask,
             &mut scratch.borrow(),
@@ -538,34 +586,56 @@ fn precompute_collapse_half<BE, Mask, TermMask, MaskAddend, MaskAddendAuto, KMas
     }
 }
 
-/// Scratch estimate for [`fixed_mask_1x1_vmp_body_addend`].
-///
-/// This is deliberately scoped to the local helper rather than the future full
-/// precompute routine. It covers the scratch-backed DFT input, DFT product,
-/// coefficient-domain big product, and the largest HAL operation scratch used
-/// by VMP, IDFT, or normalization. The public fixed-mask scratch estimator uses
-/// this for both the `key_g` and `key_h` mask-only products.
-fn fixed_mask_1x1_vmp_body_addend_tmp_bytes<BE, M, A, K>(module: &M, mask: &A, key: &K) -> usize
+fn normalize_term_for_vmp<BE, Dst, Src>(
+    module: &Module<BE>,
+    dst: &mut Dst,
+    dst_base2k: usize,
+    src: &Src,
+    src_base2k: usize,
+    scratch: &mut ScratchArena<'_, BE>,
+) where
+    BE: Backend,
+    Module<BE>: VecZnxNormalize<BE>,
+    Dst: VecZnxToBackendMut<BE> + ZnxInfos,
+    Src: VecZnxToBackendRef<BE> + ZnxInfos,
+{
+    module.vec_znx_normalize(
+        &mut dst.to_backend_mut(),
+        dst_base2k,
+        0,
+        0,
+        &src.to_backend_ref(),
+        src_base2k,
+        0,
+        scratch,
+    );
+}
+
+fn fixed_mask_1x1_vmp_body_addend_tmp_bytes_for_size<BE, K>(
+    module: &(
+         impl VecZnxBigBytesOf
+         + VecZnxBigNormalizeTmpBytes
+         + VecZnxDftBytesOf
+         + VecZnxIdftApplyTmpBytes
+         + VmpApplyDftToDftTmpBytes
+     ),
+    mask_size: usize,
+    key: &K,
+) -> usize
 where
     BE: Backend,
-    M: VecZnxBigBytesOf
-        + VecZnxBigNormalizeTmpBytes
-        + VecZnxDftBytesOf
-        + VecZnxIdftApplyTmpBytes
-        + VmpApplyDftToDftTmpBytes,
-    A: ZnxInfos,
     K: GGLWEInfos,
 {
     let key_size = key.size();
 
     let align = |len: usize| len.next_multiple_of(BE::SCRATCH_ALIGN);
-    let lvl_0 = align(module.bytes_of_vec_znx_dft(1, mask.size()));
+    let lvl_0 = align(module.bytes_of_vec_znx_dft(1, mask_size));
     let lvl_1 = align(module.bytes_of_vec_znx_dft(1, key_size));
     let lvl_2 = align(module.bytes_of_vec_znx_big(1, key_size));
     let lvl_ops = module
         .vmp_apply_dft_to_dft_tmp_bytes(
             key_size,
-            mask.size(),
+            mask_size,
             key.dnum().as_usize(),
             key.rank_in().as_usize(),
             key.rank_out().as_usize() + 1,
@@ -575,6 +645,97 @@ where
         .max(module.vec_znx_big_normalize_tmp_bytes());
 
     lvl_0 + lvl_1 + lvl_2 + lvl_ops
+}
+
+/// Re-encodes an aggregate mask into the widened arithmetic base used by the
+/// offline fixed-mask precompute.
+pub(crate) fn normalize_precompute_aggregate<BE, A>(
+    module: &Module<BE>,
+    dst: &mut VecZnx<BE::OwnedBuf>,
+    dst_base2k: usize,
+    src: &A,
+    src_base2k: usize,
+    scratch: &mut ScratchArena<'_, BE>,
+) where
+    BE: Backend,
+    Module<BE>: VecZnxNormalize<BE>,
+    A: VecZnxToBackendRef<BE> + ZnxInfos,
+{
+    assert_eq!(
+        dst.cols(),
+        src.cols(),
+        "precompute aggregate column count mismatch"
+    );
+
+    let cols = dst.cols();
+    let src_ref = src.to_backend_ref();
+    let mut dst_mut = <VecZnx<BE::OwnedBuf> as VecZnxToBackendMut<BE>>::to_backend_mut(dst);
+    for col in 0..cols {
+        module.vec_znx_normalize(
+            &mut dst_mut,
+            dst_base2k,
+            0,
+            col,
+            &src_ref,
+            src_base2k,
+            col,
+            scratch,
+        );
+    }
+}
+
+/// Converts widened coefficient-domain precompute state back to the public
+/// packing base before the DFT-hot cache is built for the online pass.
+pub(crate) fn normalize_precompute_coefficients<BE>(
+    module: &Module<BE>,
+    dst: &mut PackingPrecomputations<BE>,
+    src: &PackingPrecomputations<BE>,
+    scratch: &mut ScratchArena<'_, BE>,
+) where
+    BE: Backend,
+    Module<BE>: VecZnxNormalize<BE>,
+    VecZnx<BE::OwnedBuf>: VecZnxToBackendRef<BE>,
+{
+    assert_eq!(dst.steps, src.steps, "packing precompute step mismatch");
+    assert_eq!(
+        dst.bsgs_baby_size, src.bsgs_baby_size,
+        "packing precompute baby-size mismatch"
+    );
+
+    {
+        let src_ref = src.body_vmp_masks.to_backend_ref();
+        let mut dst_mut = <VecZnx<BE::OwnedBuf> as VecZnxToBackendMut<BE>>::to_backend_mut(
+            &mut dst.body_vmp_masks,
+        );
+        for step in 0..dst.steps {
+            module.vec_znx_normalize(
+                &mut dst_mut,
+                dst.base2k,
+                0,
+                step,
+                &src_ref,
+                src.base2k,
+                step,
+                scratch,
+            );
+        }
+    }
+
+    {
+        let src_ref = src.final_mask.to_backend_ref();
+        let mut dst_mut =
+            <VecZnx<BE::OwnedBuf> as VecZnxToBackendMut<BE>>::to_backend_mut(&mut dst.final_mask);
+        module.vec_znx_normalize(
+            &mut dst_mut,
+            dst.base2k,
+            0,
+            0,
+            &src_ref,
+            src.base2k,
+            0,
+            scratch,
+        );
+    }
 }
 
 /// Computes the coefficient-domain body addend of a fixed-mask `1 x 1` VMP.

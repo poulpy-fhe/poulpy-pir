@@ -1,124 +1,92 @@
 use crate::{
-    database::{DatabaseLayout, U256_PAYLOAD_BYTES},
-    encoding::U256_BASE65535_DIGITS,
+    database::{DatabaseInfos, DatabaseLayout},
+    payload::{Payload, U256P65535},
 };
 use poulpy_cpu_ref::FFT64Ref;
 use poulpy_hal::layouts::Module;
 
 type BE = FFT64Ref;
+/// Layout for full 256-bit payloads (17 base-65535 digits).
+type L = DatabaseLayout<U256P65535>;
+const DIGITS: usize = U256P65535::EXPONENT; // 17
 
-/// Pins down the layout math for the working example used throughout the docs:
-/// 32 GB of 32-byte payloads, ring degree `n = 2048`, first-dim block count
-/// `k_blocks = 2`. This is the exact `(2^35 / (T·N)) × (N·T)` shape framing.
+/// Shape-driven construction: the `block_rows × block_cols` grid is the input;
+/// coefficient dims and capacity are derived. Pins the payload-packing math.
 #[test]
-fn database_layout_32gb_32b_n2048_t2() {
+fn layout_shape_and_capacity() {
     const N: usize = 2048;
-    const T: usize = 2;
-    const TOTAL_BYTES: usize = 32 << 30; // 32 GB
+    let layout = L::new(N, /* block_rows */ 4, /* block_cols */ 32);
 
-    let layout = DatabaseLayout::from_total_bytes(N, T, 16, TOTAL_BYTES);
+    assert_eq!(layout.payload_digits(), DIGITS);
+    assert_eq!(layout.payload_digits(), 17); // full 2^256, not the 16-digit bound
+    assert_eq!(layout.p(), 65535);
 
-    // num_payloads = 2^35 / 32 = 2^30.
-    assert_eq!(layout.num_payloads, 1 << 30);
-
-    // cols = T·N = 4096.
-    assert_eq!(layout.cols, T * N);
-
-    // payloads/col = N / 16 = 128, payloads/matrix = 128 · 4096 = 2^19.
-    assert_eq!(layout.payloads_per_column, N / U256_BASE65535_DIGITS);
-    assert_eq!(layout.payloads_per_matrix, 1 << 19);
-
-    // D = 2^30 / 2^19 = 2^11 = 2048 matrices, t = 2048.
-    assert_eq!(layout.nb_matrices, 1 << 11);
-    assert_eq!(layout.interpolation_t, 1 << 11);
-
-    // Total i16 = 2^34 (because each i16 carries one ≈16-bit base-65535 digit).
-    assert_eq!(layout.total_i16_slots(), 1usize << 34);
-    // Total payload bytes = 2^35 = 32 GB (no slack on this divisible case).
-    assert_eq!(layout.total_payload_bytes(), TOTAL_BYTES);
-    assert_eq!(layout.unused_payload_slots(), 0);
-
-    // Byte-matrix view matches the user-facing `(2^35 / (T·N)) × (T·N)` shape.
-    let (rows_bytes, cols_bytes) = layout.byte_matrix_shape();
-    assert_eq!(cols_bytes, T * N);
-    assert_eq!(rows_bytes, TOTAL_BYTES / (T * N));
-    assert_eq!(rows_bytes * cols_bytes, TOTAL_BYTES);
+    assert_eq!(layout.rows(), 4 * N);
+    assert_eq!(layout.cols(), 32 * N);
+    // payloads/col = floor(N / 17) = 120 (8 rows per column are unused slack).
+    assert_eq!(layout.payloads_per_column(), N / DIGITS);
+    assert_eq!(layout.payloads_per_column(), 120);
+    assert_eq!(layout.payloads_per_block_row(), (N / DIGITS) * 32 * N);
+    assert_eq!(layout.num_payloads(), 4 * (N / DIGITS) * 32 * N);
+    assert_eq!(layout.interpolation_t(), 4); // next_pow2(block_rows)
+    assert_eq!(layout.total_i16_slots(), layout.rows() * layout.cols());
+    assert_eq!(layout.total_payload_bytes(), layout.num_payloads() * 32);
 }
 
-/// `instantiate` must give a database whose own capacity matches the layout.
+/// `with_capacity` sizes the block-rows to just fit a target payload count.
 #[test]
-fn database_layout_instantiate_matches_capacity() {
-    let n: usize = 16; // small ring so the test is cheap
+fn with_capacity_is_tight() {
+    const N: usize = 2048;
+    let target = 1usize << 30;
+    let layout = L::with_capacity(N, /* block_cols */ 2, target);
+    assert!(layout.num_payloads() >= target);
+    // one block-row fewer would not fit.
+    assert!((layout.block_rows() - 1) * layout.payloads_per_block_row() < target);
+}
+
+/// `from_total_bytes` covers the requested byte budget and stays within `2n`.
+#[test]
+fn from_total_bytes_covers_budget() {
+    const N: usize = 2048;
+    const TOTAL_BYTES: usize = 32 << 30; // 32 GB of 32-byte payloads
+    let layout = L::from_total_bytes(N, 2, TOTAL_BYTES);
+    assert!(layout.total_payload_bytes() >= TOTAL_BYTES);
+    assert!(layout.interpolation_t() <= 2 * N);
+}
+
+/// `instantiate` gives a database whose capacity matches the layout.
+#[test]
+fn instantiate_matches_capacity() {
+    let n: usize = 32; // small ring (n ≥ 17 so a payload fits a column)
     let module = Module::<BE>::new(n as u64);
-
-    let layout = DatabaseLayout::new(
-        n, /* k_blocks */ 2, /* base2k */ 16, /* payloads */ 96,
-    );
-    // 96 = 3 · payloads_per_matrix (= 1 · 32) at n=16, T=2: 3 matrices, slack 0.
-    assert_eq!(layout.payloads_per_column, 1);
-    assert_eq!(layout.payloads_per_matrix, 32);
-    assert_eq!(layout.nb_matrices, 3);
-    assert_eq!(layout.interpolation_t, 4);
-    assert_eq!(layout.unused_payload_slots(), 0);
-
-    let db = layout.instantiate(&module);
-    assert_eq!(db.u256_payload_capacity(&module), 96);
-    // 3 matrices, each tiled into k_blocks = 2 column-blocks ⇒ 6 sub-matrices.
+    let layout = L::new(n, /* block_rows */ 3, /* block_cols */ 2);
+    let db = layout.instantiate(&module, /* base2k */ 16);
+    assert_eq!(db.payload_capacity(), layout.num_payloads());
+    // 3 block-rows × 2 block-cols ⇒ 6 sub-matrices.
     assert_eq!(db.matrices().len(), 3 * 2);
 }
 
-/// A non-divisible payload count rounds up to the next full matrix, leaving
-/// slack capacity in the trailing matrix.
-#[test]
-fn database_layout_rounds_up_and_reports_slack() {
-    let n: usize = 16;
-    let layout = DatabaseLayout::new(n, 2, 16, /* payloads */ 33);
-    // payloads_per_matrix = 32, so 33 payloads need 2 matrices with 31 unused.
-    assert_eq!(layout.nb_matrices, 2);
-    assert_eq!(layout.payloads_per_matrix, 32);
-    assert_eq!(layout.unused_payload_slots(), 2 * 32 - 33);
-    assert_eq!(layout.total_payload_bytes(), 2 * 32 * U256_PAYLOAD_BYTES);
-}
-
-/// The second dimension (matrix-axis interpolation degree) cannot exceed `2n`,
-/// the count of distinct roots of unity in `Z[X]/(X^n+1)`. A layout whose
-/// `nb_matrices` would push `interpolation_t` past `2n` must panic.
+/// The second dimension (`interpolation_t = next_pow2(block_rows)`) cannot exceed
+/// `2n`, the count of distinct roots of unity in `Z[X]/(X^n+1)`.
 #[test]
 #[should_panic(expected = "second dimension")]
-fn database_layout_rejects_second_dimension_over_2n() {
-    let n: usize = 16; // 2n = 32
-    // k_blocks = 1 → payloads_per_matrix = (n/16)·n = 16, so 33 matrices' worth
-    // of payloads forces interpolation_t = next_pow2(33) = 64 > 2n = 32.
-    let payloads = 33 * 16;
-    let _ = DatabaseLayout::new(n, 1, 16, payloads);
+fn rejects_second_dimension_over_2n() {
+    let n: usize = 32; // 2n = 64
+    let layout = L::new(n, /* block_rows */ 65, 1); // next_pow2(65) = 128 > 64
+    let _ = layout.interpolation_t(); // the bound is enforced here
 }
 
-/// `nb_matrices == 2n` (interpolation_t == 2n) is the largest allowed second
-/// dimension and must be accepted.
+/// `interpolation_t == 2n` is the largest allowed second dimension.
 #[test]
-fn database_layout_accepts_second_dimension_exactly_2n() {
-    let n: usize = 16; // 2n = 32
-    let payloads = 32 * 16; // exactly 32 matrices
-    let layout = DatabaseLayout::new(n, 1, 16, payloads);
-    assert_eq!(layout.nb_matrices, 32);
-    assert_eq!(layout.interpolation_t, 32);
+fn accepts_second_dimension_exactly_2n() {
+    let n: usize = 32; // 2n = 64
+    let layout = L::new(n, /* block_rows */ 64, 1); // next_pow2(64) = 64
+    assert_eq!(layout.interpolation_t(), 64);
 }
 
-/// Sweep `k_blocks` across powers of two for a fixed 32 GB target and verify
-/// the (T, D) trade-off matches the paper's `D · T = constant` relation.
+/// A payload must fit within one column: `payload_digits ≤ n`.
 #[test]
-fn database_layout_t_d_tradeoff_is_constant() {
-    const N: usize = 2048;
-    const TOTAL_BYTES: usize = 32 << 30;
-    let mut t_d_products = Vec::new();
-    for k_blocks in [1, 2, 4, 8, 16, 32] {
-        let layout = DatabaseLayout::from_total_bytes(N, k_blocks, 16, TOTAL_BYTES);
-        t_d_products.push(layout.k_blocks * layout.nb_matrices);
-        // The shape always sums back to the same 2^35 capacity.
-        assert_eq!(layout.total_payload_bytes(), TOTAL_BYTES);
-    }
-    assert!(t_d_products.windows(2).all(|w| w[0] == w[1]));
-    // T · D · payloads_per_column = num_payloads, with
-    // payloads_per_column = n / 16 = 128. So T · D = 2^30 / 128 = 2^23 / 2^11 = 2^12.
-    assert_eq!(t_d_products[0], 1 << 12);
+#[should_panic(expected = "must fit within one column")]
+fn rejects_payload_wider_than_column() {
+    let _ = L::new(/* n */ 16, 1, 1); // 17 digits > 16 rows
 }

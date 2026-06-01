@@ -8,28 +8,37 @@
 
 #![allow(clippy::too_many_arguments)]
 
+use poulpy_core::EncryptionInfos;
 use poulpy_core::layouts::{
-    GGLWECompressedSeed, GGLWEInfos, GLWEInfos, GLWEToBackendMut, GetGaloisElement,
-    compressed::GGLWECompressedToBackendRef,
-    prepared::{GGLWEPrepared, GGLWEPreparedVmpPMatRef},
+    CoeffBound, CoeffMatrix, GGLWECompressedSeed, GGLWEInfos, GLWEAutomorphismKeyCompressed,
+    GLWEInfos, GLWEToBackendMut, GLWEToBackendRef, GetGaloisElement, LWEInfos, LWEMatrix,
+    LWEMatrixInfos, LWESecretToBackendRef, compressed::GGLWECompressedToBackendRef,
+    prepared::GLWESecretPreparedToBackendRef,
 };
 use poulpy_hal::layouts::{
-    Backend, ScratchArena, VecZnxToBackendMut, VecZnxToBackendRef, ZnxInfos,
+    Backend, ScratchArena, Stats, VecZnxToBackendMut, VecZnxToBackendRef, ZnxInfos,
 };
+use poulpy_hal::source::Source;
 
-use crate::packing::collapse_precompute::{PackingPrecomputations, PackingPrecomputeInfos};
+use crate::{
+    encoding::ModPEncoder,
+    packing::{
+        PackingKeys,
+        packing_precomputations::{PackingPrecomputations, PackingPrecomputeInfos},
+    },
+};
 
 /// Aggregates a DB-multiplied LWE mask matrix into the mask layout consumed by packing.
 pub trait PackingMaskAggregation<BE: Backend> {
-    /// Scratch estimate for [`PackingMaskAggregation::packing_mask_aggregate`].
-    fn packing_mask_aggregate_tmp_bytes(&self, size: usize) -> usize;
+    /// Scratch estimate for [`PackingMaskAggregation::packing_mask_preprocessing`].
+    fn packing_mask_preprocessing_tmp_bytes(&self, size: usize) -> usize;
 
     /// Aggregates `a` into `dst`.
     ///
     /// `a` is the `n x n` LWE mask matrix produced after query expansion and
     /// database multiplication. `dst` receives the `n` aggregate mask columns
     /// used by [`Packing::pack_precompute`].
-    fn packing_mask_aggregate<R, A>(
+    fn packing_mask_preprocessing<R, A>(
         &self,
         dst: &mut R,
         base2k: usize,
@@ -38,68 +47,6 @@ pub trait PackingMaskAggregation<BE: Backend> {
     ) where
         R: VecZnxToBackendMut<BE> + ZnxInfos,
         A: VecZnxToBackendRef<BE> + ZnxInfos;
-}
-
-/// Accessor for client-key-side packing precomputations.
-///
-/// Packing only needs prepared body projections online: baby-step bodies for
-/// `key_g` products and the final `key_h` body. Fixed key-mask material is
-/// derived from a compressed key seed inside [`Packing::pack_precompute`].
-pub trait PackingKeyPrecomputationsHelper<BE: Backend, K>
-where
-    K: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos,
-{
-    /// Prepared body key for baby step `idx`.
-    ///
-    /// Used by the online BSGS loop in `bsgs_pack` for every group that has a
-    /// live baby step at this index.
-    fn baby_key_g(&self, idx: usize) -> &K;
-
-    /// Prepared body key for the final `key_h` product.
-    ///
-    /// Used once after all BSGS `key_g` groups have been accumulated.
-    fn key_h(&self) -> &K;
-
-    /// Output size of the key products, used to size online scratch buffers.
-    fn key_size(&self) -> usize {
-        self.key_h().size()
-    }
-}
-
-/// Owned user-key-side precomputations used by packing.
-///
-/// This is the current concrete key-precompute container. It is produced by
-/// [`Packing::pack_keys_precompute`] from the full `key_g`/`key_h` switching
-/// keys and contains no seed-derived mask material.
-pub struct PackingKeyPrecomputations<K> {
-    /// Prepared baby-step `key_g` body keys indexed by baby step.
-    baby_key_g_bodies: Vec<K>,
-    /// Prepared final `key_h` body key.
-    key_h_body: K,
-}
-
-impl<K> PackingKeyPrecomputations<K> {
-    /// Creates owned user-key-side body precomputations.
-    pub fn new(baby_key_g_bodies: Vec<K>, key_h_body: K) -> Self {
-        Self {
-            baby_key_g_bodies,
-            key_h_body,
-        }
-    }
-}
-
-impl<BE, K> PackingKeyPrecomputationsHelper<BE, K> for PackingKeyPrecomputations<K>
-where
-    BE: Backend,
-    K: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos,
-{
-    fn baby_key_g(&self, idx: usize) -> &K {
-        &self.baby_key_g_bodies[idx]
-    }
-
-    fn key_h(&self) -> &K {
-        &self.key_h_body
-    }
 }
 
 /// Deep-batched BSGS DFT-hot packing.
@@ -134,7 +81,7 @@ pub trait Packing<BE: Backend> {
         key_h: &KH,
         baby_size: usize,
         scratch: &mut ScratchArena<'_, BE>,
-    ) -> PackingKeyPrecomputations<GGLWEPrepared<BE::OwnedBuf, BE>>
+    ) -> PackingKeys<BE>
     where
         KG: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement,
         KH: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement;
@@ -191,17 +138,116 @@ pub trait Packing<BE: Backend> {
     /// `chunk_size` controls how many giant-step groups are processed together
     /// while reusing baby keys; larger chunks spend more scratch to improve key
     /// reuse in the online loop.
-    fn pack<R, B, P, K>(
+    fn pack<R, B>(
         &self,
         res: &mut R,
         body: &B,
         precomputations: &PackingPrecomputations<BE>,
-        key_precomputations: &P,
+        key_precomputations: &PackingKeys<BE>,
         chunk_size: usize,
         scratch: &mut ScratchArena<'_, BE>,
     ) where
         R: GLWEToBackendMut<BE> + GLWEInfos,
-        B: VecZnxToBackendRef<BE> + ZnxInfos,
-        P: PackingKeyPrecomputationsHelper<BE, K>,
-        K: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos;
+        B: VecZnxToBackendRef<BE> + ZnxInfos;
+}
+
+/// Client-side generation of the two compressed automorphism keys consumed by
+/// packing.
+///
+/// The server side never generates these. A client holding its raw LWE secret
+/// calls this to produce the `(key_g, key_h)` pair with exactly the galois
+/// elements and shared mask seed that the server-side
+/// [`Packing::pack_keys_precompute`] / [`Packing::pack_precompute`] path
+/// requires:
+/// - `key_g` is generated with `p = galois_element_inv(galois_element(1))`,
+/// - `key_h` is generated with `p = -1`,
+/// - both use `key_seed` as their common mask seed.
+///
+/// These are the invariants that [`Packing::pack_keys_precompute`] otherwise
+/// only checks defensively via assertions; generating the keys through this
+/// helper makes them impossible to get wrong. The LWE secret is wrapped into
+/// the rank-1 GLWE polynomial key (`sk_base`) the natural automorphism keys are
+/// signed under. The returned keys are compressed (seed-only mask), ready to be
+/// sent to the server.
+pub trait PackingKeysGenerate<BE: Backend> {
+    /// Scratch estimate for [`PackingKeysGenerate::pack_keys_generate`].
+    fn pack_keys_generate_tmp_bytes<E>(&self, key_infos: &E) -> usize
+    where
+        E: GGLWEInfos;
+
+    /// Encrypts the `(key_g, key_h)` packing automorphism keys under `sk_lwe`.
+    ///
+    /// `key_infos` describes the shared automorphism-key layout, `key_seed` is
+    /// the public mask seed shared by both keys, and `source_xe` supplies the
+    /// encryption noise.
+    fn pack_keys_generate<E, S>(
+        &self,
+        key_infos: &E,
+        sk_lwe: &S,
+        key_seed: [u8; 32],
+        source_xe: &mut Source,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) -> (
+        GLWEAutomorphismKeyCompressed<Vec<u8>>,
+        GLWEAutomorphismKeyCompressed<Vec<u8>>,
+    )
+    where
+        E: EncryptionInfos + GGLWEInfos,
+        S: LWESecretToBackendRef<BE>;
+}
+
+/// Diagnostic helper for checking the noise of a DB-selected LWE matrix product.
+///
+/// The expected plaintext is built from `coeffs[:, column]`, using `encoder`
+/// to match the `1/p` one-hot query encoding. The `product` is decrypted with
+/// [`poulpy_core::LWEMatrixDecrypt`] and the resulting plaintext error is
+/// reported through [`poulpy_core::GLWENoise`].
+pub trait LWEMatrixCoeffNoise<BE: Backend> {
+    /// Scratch estimate for [`LWEMatrixCoeffNoise::lwe_matrix_coeff_noise`].
+    fn lwe_matrix_coeff_noise_tmp_bytes<P>(&self, product: &P) -> usize
+    where
+        P: LWEMatrixInfos;
+
+    /// Decrypts `product`, compares it to the selected coefficient column, and
+    /// returns max/std noise statistics.
+    fn lwe_matrix_coeff_noise<BU, S>(
+        &self,
+        coeffs: &CoeffMatrix<BE::OwnedBuf, BU>,
+        column: usize,
+        product: &LWEMatrix<BE::OwnedBuf>,
+        sk_lwe: &S,
+        encoder: &ModPEncoder,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) -> Stats
+    where
+        BU: CoeffBound,
+        S: LWESecretToBackendRef<BE> + LWEInfos;
+}
+
+/// Diagnostic helper for checking the noise of a packed GLWE coefficient product.
+///
+/// The expected plaintext is built from `coeffs[:, column]`, using `encoder`
+/// to match the `1/p` one-hot query encoding. The packed GLWE is compared with
+/// [`poulpy_core::GLWENoise`] under the provided prepared GLWE secret key.
+pub trait GLWECoeffNoise<BE: Backend> {
+    /// Scratch estimate for [`GLWECoeffNoise::glwe_coeff_noise`].
+    fn glwe_coeff_noise_tmp_bytes<G>(&self, glwe: &G) -> usize
+    where
+        G: GLWEInfos;
+
+    /// Compares `glwe` to the selected coefficient column and returns max/std
+    /// noise statistics.
+    fn glwe_coeff_noise<BU, G, S>(
+        &self,
+        coeffs: &CoeffMatrix<BE::OwnedBuf, BU>,
+        column: usize,
+        glwe: &G,
+        sk_glwe: &S,
+        encoder: &ModPEncoder,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) -> Stats
+    where
+        BU: CoeffBound,
+        G: GLWEToBackendRef<BE> + GLWEInfos,
+        S: GLWESecretPreparedToBackendRef<BE> + GLWEInfos;
 }

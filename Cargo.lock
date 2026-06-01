@@ -343,6 +343,7 @@ dependencies = [
 name = "poulpy-pir"
 version = "0.1.0"
 dependencies = [
+ "getrandom",
  "poulpy-core",
  "poulpy-cpu-avx",
  "poulpy-cpu-ref",

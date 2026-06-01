@@ -3,9 +3,9 @@
 //! This file contains the hot path behind [`Packing::pack`](crate::packing::Packing::pack).
 //! It consumes fixed mask-side DFT columns from
 //! [`PackingPrecomputations`] and client-key-side prepared bodies through
-//! [`PackingKeyPrecomputationsHelper`].
+//! [`PackingKeys`].
 
-use poulpy_core::layouts::{GGLWEInfos, GGLWEPreparedVmpPMatRef, GLWEInfos, GLWEToBackendMut};
+use poulpy_core::layouts::{GGLWEPreparedVmpPMatRef, GLWEInfos, GLWEToBackendMut};
 use poulpy_hal::{
     api::{
         ScratchArenaTakeBasic, VecZnxBigBytesOf, VecZnxBigNormalize, VecZnxCopyBackend,
@@ -18,9 +18,7 @@ use poulpy_hal::{
     },
 };
 
-use crate::packing::{
-    PackingKeyPrecomputationsHelper, collapse_precompute::PackingPrecomputations,
-};
+use crate::packing::{PackingKeys, packing_precomputations::PackingPrecomputations};
 
 /// Online BSGS DFT-hot packing implementation.
 ///
@@ -29,12 +27,12 @@ use crate::packing::{
 /// automorphism. Increasing it improves reuse but grows scratch roughly as
 /// `chunk_size * baby_size * key_size * n * 8`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn pack_default<BE, B, R, H, K>(
+pub(crate) fn pack_default<BE, B, R>(
     module: &Module<BE>,
     res: &mut R,
     body: &B,
     precomputations: &PackingPrecomputations<BE>,
-    key_precomputations: &H,
+    key_precomputations: &PackingKeys<BE>,
     chunk_size: usize,
     scratch: &mut ScratchArena<'_, BE>,
 ) where
@@ -51,8 +49,6 @@ pub(crate) fn pack_default<BE, B, R, H, K>(
         + VmpApplyDftToDft<BE>,
     R: GLWEToBackendMut<BE> + GLWEInfos,
     B: VecZnxToBackendRef<BE> + ZnxInfos,
-    H: PackingKeyPrecomputationsHelper<BE, K>,
-    K: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos,
     <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static,
     for<'a> ScratchArena<'a, BE>: ScratchArenaTakeBasic<'a, BE>,
 {

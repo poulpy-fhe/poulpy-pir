@@ -5,21 +5,19 @@
 #![allow(clippy::too_many_arguments)]
 
 use poulpy_core::{
-    GLWEMaskFillDefault, ScratchArenaTakeCore,
+    GLWEMaskFillDefault,
     layouts::{
         GGLWECompressedSeed, GGLWEInfos, GGLWEPreparedFactory, GLWEInfos, GLWEToBackendMut,
-        GetGaloisElement,
-        compressed::GGLWECompressedToBackendRef,
-        prepared::{GGLWEPrepared, GGLWEPreparedVmpPMatRef},
+        GetGaloisElement, compressed::GGLWECompressedToBackendRef,
     },
 };
 use poulpy_hal::{
     api::{
-        ScratchArenaTakeBasic, VecZnxAddAssignBackend, VecZnxAlloc, VecZnxAutomorphismBackend,
-        VecZnxBigBytesOf, VecZnxBigNormalize, VecZnxBigNormalizeTmpBytes, VecZnxCopyBackend,
-        VecZnxDftAddAssign, VecZnxDftAlloc, VecZnxDftApply, VecZnxDftAutomorphism,
-        VecZnxDftAutomorphismPlan, VecZnxDftBytesOf, VecZnxDftZero, VecZnxIdftApply,
-        VecZnxIdftApplyTmpBytes, VecZnxRotateAssignBackend, VecZnxRotateAssignTmpBytes,
+        VecZnxAddAssignBackend, VecZnxAlloc, VecZnxAutomorphismBackend, VecZnxBigBytesOf,
+        VecZnxBigNormalize, VecZnxBigNormalizeTmpBytes, VecZnxCopyBackend, VecZnxDftAddAssign,
+        VecZnxDftAlloc, VecZnxDftApply, VecZnxDftAutomorphism, VecZnxDftAutomorphismPlan,
+        VecZnxDftBytesOf, VecZnxDftZero, VecZnxIdftApply, VecZnxIdftApplyTmpBytes, VecZnxNormalize,
+        VecZnxNormalizeTmpBytes, VecZnxRotateAssignBackend, VecZnxRotateAssignTmpBytes,
         VecZnxRshAssignBackend, VecZnxRshTmpBytes, VecZnxTransposeBackend, VmpApplyDftToDft,
         VmpApplyDftToDftTmpBytes,
     },
@@ -30,28 +28,30 @@ use poulpy_hal::{
 };
 
 use crate::packing::{
-    PackingKeyPrecomputations, PackingKeyPrecomputationsHelper,
-    aggregate::{packing_mask_aggregate_default, packing_mask_aggregate_tmp_bytes_default},
-    bsgs_pack,
-    collapse_precompute::{
-        PackingPrecomputations, PackingPrecomputeInfos, pack_precompute_alloc_default,
-        precompute_sequential_keyswitch_collapse_aggregate_mask,
-        precompute_sequential_keyswitch_collapse_aggregate_mask_tmp_bytes,
-        sequential_collapse_bsgs_dft_build, sequential_collapse_bsgs_dft_build_tmp_bytes,
-    },
-    key_precompute::{
+    PackingKeys, packing,
+    packing_keys::{
         mask_key_layout, pack_keys_precompute_default, packing_keys_precompute_tmp_bytes,
         packing_mask_keys_precompute, packing_mask_keys_precompute_tmp_bytes,
+    },
+    packing_mask_preprocessing::{
+        packing_mask_preprocessing_default, packing_mask_preprocessing_tmp_bytes_default,
+    },
+    packing_precomputations::{
+        PackingPrecomputations, PackingPrecomputeInfos, arithmetic_precompute_metadata,
+        normalize_precompute_aggregate, normalize_precompute_coefficients,
+        pack_precompute_alloc_default, precompute_sequential_keyswitch_collapse_aggregate_mask,
+        precompute_sequential_keyswitch_collapse_aggregate_mask_tmp_bytes_for_size,
+        sequential_collapse_bsgs_dft_build, sequential_collapse_bsgs_dft_build_tmp_bytes,
     },
 };
 
 #[doc(hidden)]
 pub trait PackingMaskAggregationDefault<BE: Backend> {
     /// Default scratch estimate for packing-mask aggregation.
-    fn packing_mask_aggregate_tmp_bytes_default(&self, size: usize) -> usize;
+    fn packing_mask_preprocessing_tmp_bytes_default(&self, size: usize) -> usize;
 
     /// Default packing-mask aggregation implementation.
-    fn packing_mask_aggregate_default<R, A>(
+    fn packing_mask_preprocessing_default<R, A>(
         &self,
         dst: &mut R,
         base2k: usize,
@@ -83,7 +83,7 @@ pub trait PackingDefault<BE: Backend> {
         key_h: &KH,
         baby_size: usize,
         scratch: &mut ScratchArena<'_, BE>,
-    ) -> PackingKeyPrecomputations<GGLWEPrepared<BE::OwnedBuf, BE>>
+    ) -> PackingKeys<BE>
     where
         KG: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement,
         KH: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement;
@@ -122,19 +122,17 @@ pub trait PackingDefault<BE: Backend> {
     /// Default online implementation used by backends that do not provide a
     /// specialized `PackingImpl`. It delegates to `bsgs_pack` so the OEP layer
     /// can stay thin.
-    fn pack_default<R, B, P, K>(
+    fn pack_default<R, B>(
         &self,
         res: &mut R,
         body: &B,
         precomputations: &PackingPrecomputations<BE>,
-        key_precomputations: &P,
+        key_precomputations: &PackingKeys<BE>,
         chunk_size: usize,
         scratch: &mut ScratchArena<'_, BE>,
     ) where
         R: GLWEToBackendMut<BE> + GLWEInfos,
-        B: VecZnxToBackendRef<BE> + ZnxInfos,
-        P: PackingKeyPrecomputationsHelper<BE, K>,
-        K: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos;
+        B: VecZnxToBackendRef<BE> + ZnxInfos;
 }
 
 impl<BE: Backend> PackingMaskAggregationDefault<BE> for Module<BE>
@@ -143,17 +141,19 @@ where
         + VecZnxTransposeBackend<BE>
         + VecZnxAutomorphismBackend<BE>
         + VecZnxAddAssignBackend<BE>
+        + VecZnxNormalize<BE>
+        + VecZnxNormalizeTmpBytes
         + VecZnxRotateAssignBackend<BE>
         + VecZnxRotateAssignTmpBytes
         + VecZnxRshAssignBackend<BE>
         + VecZnxRshTmpBytes
         + GaloisElement,
 {
-    fn packing_mask_aggregate_tmp_bytes_default(&self, size: usize) -> usize {
-        packing_mask_aggregate_tmp_bytes_default(self, size)
+    fn packing_mask_preprocessing_tmp_bytes_default(&self, size: usize) -> usize {
+        packing_mask_preprocessing_tmp_bytes_default(self, size)
     }
 
-    fn packing_mask_aggregate_default<R, A>(
+    fn packing_mask_preprocessing_default<R, A>(
         &self,
         dst: &mut R,
         base2k: usize,
@@ -163,7 +163,7 @@ where
         R: VecZnxToBackendMut<BE> + ZnxInfos,
         A: VecZnxToBackendRef<BE> + ZnxInfos,
     {
-        packing_mask_aggregate_default(self, dst, base2k, a, scratch);
+        packing_mask_preprocessing_default(self, dst, base2k, a, scratch);
     }
 }
 
@@ -185,12 +185,13 @@ where
         + VecZnxDftZero<BE>
         + VecZnxIdftApply<BE>
         + VecZnxIdftApplyTmpBytes
+        + VecZnxNormalize<BE>
+        + VecZnxNormalizeTmpBytes
         + VmpApplyDftToDft<BE>,
     Module<BE>: GGLWEPreparedFactory<BE> + GLWEMaskFillDefault<BE>,
     Module<BE>: VmpApplyDftToDftTmpBytes,
     <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static,
     VecZnx<BE::OwnedBuf>: VecZnxToBackendRef<BE>,
-    for<'a> ScratchArena<'a, BE>: ScratchArenaTakeBasic<'a, BE> + ScratchArenaTakeCore<'a, BE>,
 {
     fn pack_keys_precompute_tmp_bytes_default<KG, KH>(
         &self,
@@ -211,7 +212,7 @@ where
         key_h: &KH,
         baby_size: usize,
         scratch: &mut ScratchArena<'_, BE>,
-    ) -> PackingKeyPrecomputations<GGLWEPrepared<BE::OwnedBuf, BE>>
+    ) -> PackingKeys<BE>
     where
         KG: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement,
         KH: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement,
@@ -239,16 +240,26 @@ where
         A: ZnxInfos,
         KMask: GGLWEInfos,
     {
+        assert_eq!(
+            metadata.size(),
+            aggregate_mask.size(),
+            "packing precompute metadata and aggregate mask sizes differ"
+        );
         let key_mask_bytes = packing_mask_keys_precompute_tmp_bytes(self, key_mask_source);
         let key_mask_layout = mask_key_layout(key_mask_source);
-        let mask_bytes = precompute_sequential_keyswitch_collapse_aggregate_mask_tmp_bytes(
+        let arithmetic_metadata = arithmetic_precompute_metadata(metadata);
+        let mask_bytes = precompute_sequential_keyswitch_collapse_aggregate_mask_tmp_bytes_for_size(
             self,
-            aggregate_mask,
+            arithmetic_metadata.size(),
+            metadata.size(),
             &key_mask_layout,
             &key_mask_layout,
         );
         let bsgs_bytes = sequential_collapse_bsgs_dft_build_tmp_bytes(self, metadata);
-        key_mask_bytes.max(mask_bytes).max(bsgs_bytes)
+        key_mask_bytes
+            .max(mask_bytes)
+            .max(bsgs_bytes)
+            .max(self.vec_znx_normalize_tmp_bytes())
     }
 
     fn pack_precompute_default<A, KMask>(
@@ -261,34 +272,67 @@ where
         A: VecZnxToBackendRef<BE> + ZnxInfos,
         KMask: GGLWECompressedSeed + GGLWEInfos,
     {
+        assert_eq!(
+            precomputations.size(),
+            aggregate_mask.size(),
+            "packing precompute storage and aggregate mask sizes differ"
+        );
+        let target_metadata = precomputations.metadata();
+        let arithmetic_metadata = arithmetic_precompute_metadata(target_metadata);
+
         let (key_g_mask, key_h_mask) =
             packing_mask_keys_precompute(self, key_mask_source, &mut scratch.borrow());
+
+        let mut arithmetic_aggregate =
+            self.vec_znx_alloc(aggregate_mask.cols(), arithmetic_metadata.size());
+        normalize_precompute_aggregate(
+            self,
+            &mut arithmetic_aggregate,
+            arithmetic_metadata.base2k(),
+            aggregate_mask,
+            target_metadata.base2k(),
+            scratch,
+        );
+
+        let mut arithmetic_precomputations = pack_precompute_alloc_default(
+            self,
+            arithmetic_metadata.steps(),
+            arithmetic_metadata.size(),
+            arithmetic_metadata.base2k(),
+            arithmetic_metadata.baby_size(),
+        );
         precompute_sequential_keyswitch_collapse_aggregate_mask(
             self,
-            precomputations,
-            aggregate_mask,
+            &mut arithmetic_precomputations,
+            &arithmetic_aggregate,
+            target_metadata.base2k(),
+            target_metadata.size(),
             &key_g_mask,
             &key_h_mask,
+            scratch,
+        );
+        normalize_precompute_coefficients(
+            self,
+            precomputations,
+            &arithmetic_precomputations,
             scratch,
         );
         sequential_collapse_bsgs_dft_build(self, precomputations, scratch);
     }
 
-    fn pack_default<R, B, P, K>(
+    fn pack_default<R, B>(
         &self,
         res: &mut R,
         body: &B,
         precomputations: &PackingPrecomputations<BE>,
-        key_precomputations: &P,
+        key_precomputations: &PackingKeys<BE>,
         chunk_size: usize,
         scratch: &mut ScratchArena<'_, BE>,
     ) where
         R: GLWEToBackendMut<BE> + GLWEInfos,
         B: VecZnxToBackendRef<BE> + ZnxInfos,
-        P: PackingKeyPrecomputationsHelper<BE, K>,
-        K: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos,
     {
-        bsgs_pack::pack_default(
+        packing::pack_default(
             self,
             res,
             body,

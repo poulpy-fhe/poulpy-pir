@@ -53,7 +53,7 @@ pub trait HornerEvaluation<BE: Backend> {
     /// `res = c_k + res · selector` from `k = t-2` down to `k = 0`. The
     /// result is `h(X^i)` where `X^i` is the plaintext encrypted by `selector`
     /// — for a length-`t` `HornerCoeffs` built from
-    /// [`crate::database::Database::query_interpolate`], this selects the
+    /// [`crate::interpolation::Interpolation::prepare`], this selects the
     /// matrix indexed by the GGSW-encrypted root of unity.
     fn horner_evaluate<R, H, C, G>(
         &self,

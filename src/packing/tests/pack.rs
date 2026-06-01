@@ -5,23 +5,21 @@
 //! The body accumulator stays in the DFT domain through the whole schedule;
 //! per-step normalizations are deferred to a single IDFT + normalize at the
 //! end. So we verify decryption equality rather than ciphertext byte equality.
-use crate::packing::{Packing, PackingMaskAggregation, PackingPrecomputeInfos};
+use crate::packing::{
+    Packing, PackingKeysGenerate, PackingMaskAggregation, PackingPrecomputeInfos,
+};
 use poulpy_core::{
-    EncryptionLayout, GLWEAutomorphismKeyCompressedEncryptSk, GLWECompressedEncryptSk, GLWEDecrypt,
-    GLWEExpandLWEMatrix, GLWENoise,
+    EncryptionLayout, GLWECompressedEncryptSk, GLWEDecrypt, GLWEExpandLWEMatrix, GLWENoise,
     layouts::{
-        Base2K, Degree, GGLWEPreparedFactory, GLWEAutomorphismKeyCompressed,
-        GLWEAutomorphismKeyLayout, GLWEDecompress, GLWELayout, GLWESecret,
-        GLWESecretPreparedFactory, LWEInfos, LWEMatrixLayout, LWESecret, ModuleCoreAlloc,
-        ModuleCoreCompressedAlloc, Rank, SecretConversion, TorusPrecision,
+        Base2K, Degree, GGLWEPreparedFactory, GLWEAutomorphismKeyLayout, GLWEDecompress,
+        GLWELayout, GLWESecret, GLWESecretPreparedFactory, LWEInfos, LWEMatrixLayout, LWESecret,
+        ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank, SecretConversion, TorusPrecision,
     },
 };
 use poulpy_cpu_avx::FFT64Avx;
 use poulpy_hal::{
     api::{ScalarZnxAutomorphismBackend, ScratchOwnedAlloc, ScratchOwnedBorrow},
-    layouts::{
-        Backend, GaloisElement, Module, ScalarZnxToBackendMut, ScalarZnxToBackendRef, ScratchOwned,
-    },
+    layouts::{Backend, Module, ScalarZnxToBackendMut, ScalarZnxToBackendRef, ScratchOwned},
     source::Source,
 };
 
@@ -71,8 +69,8 @@ fn run() {
             .max(module.glwe_decrypt_tmp_bytes(&src_infos))
             .max(module.glwe_noise_tmp_bytes(&src_infos))
             .max(module.glwe_expand_lwe_matrix_tmp_bytes(&matrix_infos, &src_infos))
-            .max(module.packing_mask_aggregate_tmp_bytes(matrix_infos.size()))
-            .max(module.glwe_automorphism_key_compressed_encrypt_sk_tmp_bytes(&key_infos))
+            .max(module.packing_mask_preprocessing_tmp_bytes(matrix_infos.size()))
+            .max(module.pack_keys_generate_tmp_bytes(&key_infos))
             .max(module.gglwe_prepare_tmp_bytes(&key_infos))
             .max(module.pack_keys_precompute_tmp_bytes(&key_infos, &key_infos, baby_size))
             .max(module.pack_precompute_tmp_bytes(precompute_metadata, &aggregate, &key_infos)),
@@ -91,13 +89,12 @@ fn run() {
     let mut sk_dst_prep = module.glwe_secret_prepared_alloc_from_infos(&sk_base);
     module.glwe_secret_prepare(&mut sk_dst_prep, &sk_base);
 
-    let (key_g, key_h) = encrypt_packing_keys(
-        &module,
+    let (key_g, key_h) = module.pack_keys_generate(
         &key_infos,
-        &sk_base,
+        &sk_lwe,
         packing_key_seed,
         &mut source_xe,
-        &mut scratch,
+        &mut scratch.borrow(),
     );
     let key_precomputations =
         module.pack_keys_precompute(&key_g, &key_h, baby_size, &mut scratch.borrow());
@@ -123,7 +120,7 @@ fn run() {
     module.decompress_glwe(&mut src_glwe, &src);
     let mut lwe_matrix = module.lwe_matrix_alloc_from_infos(&matrix_infos);
     module.glwe_expand_lwe_matrix(&mut lwe_matrix, &src_glwe, &mut scratch.borrow());
-    module.packing_mask_aggregate(
+    module.packing_mask_preprocessing(
         &mut aggregate,
         base2k,
         lwe_matrix.mask(),
@@ -183,40 +180,6 @@ fn glwe_secret_wrap_lwe(
         module.scalar_znx_automorphism_backend(1, &mut dst_mut, 0, &src_ref, 0);
     }
     sk_glwe
-}
-
-fn encrypt_packing_keys(
-    module: &Module<FFT64Avx>,
-    key_infos: &EncryptionLayout<GLWEAutomorphismKeyLayout>,
-    sk_base: &GLWESecret<<FFT64Avx as Backend>::OwnedBuf>,
-    key_seed: [u8; 32],
-    source_xe: &mut Source,
-    scratch: &mut ScratchOwned<FFT64Avx>,
-) -> (
-    GLWEAutomorphismKeyCompressed<<FFT64Avx as Backend>::OwnedBuf>,
-    GLWEAutomorphismKeyCompressed<<FFT64Avx as Backend>::OwnedBuf>,
-) {
-    let mut key_g = module.glwe_automorphism_key_compressed_alloc_from_infos(key_infos);
-    module.glwe_automorphism_key_compressed_encrypt_sk(
-        &mut key_g,
-        module.galois_element_inv(module.galois_element(1)),
-        sk_base,
-        key_seed,
-        key_infos,
-        source_xe,
-        &mut scratch.borrow(),
-    );
-    let mut key_h = module.glwe_automorphism_key_compressed_alloc_from_infos(key_infos);
-    module.glwe_automorphism_key_compressed_encrypt_sk(
-        &mut key_h,
-        -1,
-        sk_base,
-        key_seed,
-        key_infos,
-        source_xe,
-        &mut scratch.borrow(),
-    );
-    (key_g, key_h)
 }
 
 #[test]

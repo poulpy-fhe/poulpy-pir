@@ -11,16 +11,15 @@
 use poulpy_core::layouts::{
     GGLWECompressedSeed, GGLWEInfos, GLWEInfos, GLWEToBackendMut, GetGaloisElement,
     compressed::GGLWECompressedToBackendRef,
-    prepared::{GGLWEPrepared, GGLWEPreparedVmpPMatRef},
 };
 use poulpy_hal::layouts::{
     Backend, Module, ScratchArena, VecZnxToBackendMut, VecZnxToBackendRef, ZnxInfos,
 };
 
 use crate::packing::{
-    PackingKeyPrecomputations, PackingKeyPrecomputationsHelper,
-    collapse_precompute::{PackingPrecomputations, PackingPrecomputeInfos},
+    PackingKeys,
     default::{PackingDefault, PackingMaskAggregationDefault},
+    packing_precomputations::{PackingPrecomputations, PackingPrecomputeInfos},
 };
 
 /// # Safety
@@ -30,10 +29,10 @@ use crate::packing::{
 #[allow(private_bounds)]
 pub unsafe trait PackingMaskAggregationImpl<BE: Backend>: Backend {
     /// Backend hook for packing-mask aggregation scratch estimation.
-    fn packing_mask_aggregate_tmp_bytes_impl(module: &Module<BE>, size: usize) -> usize;
+    fn packing_mask_preprocessing_tmp_bytes_impl(module: &Module<BE>, size: usize) -> usize;
 
     /// Backend hook for packing-mask aggregation.
-    fn packing_mask_aggregate_impl<R, A>(
+    fn packing_mask_preprocessing_impl<R, A>(
         module: &Module<BE>,
         dst: &mut R,
         base2k: usize,
@@ -49,11 +48,11 @@ unsafe impl<BE: Backend> PackingMaskAggregationImpl<BE> for BE
 where
     Module<BE>: PackingMaskAggregationDefault<BE>,
 {
-    fn packing_mask_aggregate_tmp_bytes_impl(module: &Module<BE>, size: usize) -> usize {
-        module.packing_mask_aggregate_tmp_bytes_default(size)
+    fn packing_mask_preprocessing_tmp_bytes_impl(module: &Module<BE>, size: usize) -> usize {
+        module.packing_mask_preprocessing_tmp_bytes_default(size)
     }
 
-    fn packing_mask_aggregate_impl<R, A>(
+    fn packing_mask_preprocessing_impl<R, A>(
         module: &Module<BE>,
         dst: &mut R,
         base2k: usize,
@@ -63,7 +62,7 @@ where
         R: VecZnxToBackendMut<BE> + ZnxInfos,
         A: VecZnxToBackendRef<BE> + ZnxInfos,
     {
-        module.packing_mask_aggregate_default(dst, base2k, a, scratch);
+        module.packing_mask_preprocessing_default(dst, base2k, a, scratch);
     }
 }
 
@@ -95,7 +94,7 @@ pub unsafe trait PackingImpl<BE: Backend>: Backend {
         key_h: &KH,
         baby_size: usize,
         scratch: &mut ScratchArena<'_, BE>,
-    ) -> PackingKeyPrecomputations<GGLWEPrepared<BE::OwnedBuf, BE>>
+    ) -> PackingKeys<BE>
     where
         KG: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement,
         KH: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement;
@@ -132,19 +131,17 @@ pub unsafe trait PackingImpl<BE: Backend>: Backend {
         KMask: GGLWECompressedSeed + GGLWEInfos;
 
     /// Backend hook for the online packing pass.
-    fn pack_impl<R, B, P, K>(
+    fn pack_impl<R, B>(
         module: &Module<BE>,
         res: &mut R,
         body: &B,
         precomputations: &PackingPrecomputations<BE>,
-        key_precomputations: &P,
+        key_precomputations: &PackingKeys<BE>,
         chunk_size: usize,
         scratch: &mut ScratchArena<'_, BE>,
     ) where
         R: GLWEToBackendMut<BE> + GLWEInfos,
-        B: VecZnxToBackendRef<BE> + ZnxInfos,
-        P: PackingKeyPrecomputationsHelper<BE, K>,
-        K: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos;
+        B: VecZnxToBackendRef<BE> + ZnxInfos;
 }
 
 #[allow(private_bounds)]
@@ -171,7 +168,7 @@ where
         key_h: &KH,
         baby_size: usize,
         scratch: &mut ScratchArena<'_, BE>,
-    ) -> PackingKeyPrecomputations<GGLWEPrepared<BE::OwnedBuf, BE>>
+    ) -> PackingKeys<BE>
     where
         KG: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement,
         KH: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement,
@@ -215,19 +212,17 @@ where
         module.pack_precompute_default(precomputations, aggregate_mask, key_mask_source, scratch);
     }
 
-    fn pack_impl<R, B, P, K>(
+    fn pack_impl<R, B>(
         module: &Module<BE>,
         res: &mut R,
         body: &B,
         precomputations: &PackingPrecomputations<BE>,
-        key_precomputations: &P,
+        key_precomputations: &PackingKeys<BE>,
         chunk_size: usize,
         scratch: &mut ScratchArena<'_, BE>,
     ) where
         R: GLWEToBackendMut<BE> + GLWEInfos,
         B: VecZnxToBackendRef<BE> + ZnxInfos,
-        P: PackingKeyPrecomputationsHelper<BE, K>,
-        K: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos,
     {
         module.pack_default(
             res,

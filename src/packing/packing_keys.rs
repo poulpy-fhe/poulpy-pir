@@ -6,20 +6,165 @@
 //! [`GGLWECompressedSeed`] part of a compressed key.
 
 use poulpy_core::{
-    GLWEMaskFillDefault, ScratchArenaTakeCore,
+    EncryptionInfos, GLWEAutomorphismKeyCompressedEncryptSk, GLWEMaskFillDefault,
+    ScratchArenaTakeCore,
     layouts::{
         GGLWE, GGLWEAtViewMut, GGLWEAtViewRef, GGLWECompressedSeed, GGLWEInfos, GGLWELayout,
-        GGLWEPreparedFactory, GGLWEToBackendMut, GGLWEToBackendRef, GLWEToBackendMut,
-        GLWEToBackendRef, GetGaloisElement, ModuleCoreAlloc, Rank,
+        GGLWEPreparedFactory, GGLWEToBackendMut, GGLWEToBackendRef, GLWEAutomorphismKeyCompressed,
+        GLWESecret, GLWESecretToBackendMut, GLWEToBackendMut, GLWEToBackendRef, GetGaloisElement,
+        LWEInfos, LWESecretToBackendRef, ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank,
         compressed::GGLWECompressedToBackendRef, prepared::GGLWEPrepared,
     },
 };
 use poulpy_hal::{
-    api::{VecZnxAutomorphismBackend, VecZnxCopyBackend},
+    api::{ScalarZnxAutomorphismBackend, VecZnxAutomorphismBackend, VecZnxCopyBackend},
     layouts::{Backend, GaloisElement, Module, ScratchArena},
+    source::Source,
 };
 
-use crate::packing::PackingKeyPrecomputations;
+use crate::packing::PackingKeysGenerate;
+
+/// Owned user-key-side precomputations used by packing.
+///
+/// This is the current concrete key-precompute container. It is produced by
+/// [`Packing::pack_keys_precompute`] from the full `key_g`/`key_h` switching
+/// keys and contains no seed-derived mask material.
+pub struct PackingKeys<BE: Backend> {
+    /// Prepared baby-step `key_g` body keys indexed by baby step.
+    baby_key_g_bodies: Vec<GGLWEPrepared<BE::OwnedBuf, BE>>,
+    /// Prepared final `key_h` body key.
+    key_h_body: GGLWEPrepared<BE::OwnedBuf, BE>,
+}
+
+impl<BE: Backend> PackingKeys<BE> {
+    /// Creates owned user-key-side body precomputations.
+    pub fn new(
+        baby_key_g_bodies: Vec<GGLWEPrepared<BE::OwnedBuf, BE>>,
+        key_h_body: GGLWEPrepared<BE::OwnedBuf, BE>,
+    ) -> Self {
+        Self {
+            baby_key_g_bodies,
+            key_h_body,
+        }
+    }
+
+    /// Returns the prepared baby-step `key_g` body at `idx`.
+    pub fn baby_key_g(&self, idx: usize) -> &GGLWEPrepared<BE::OwnedBuf, BE> {
+        &self.baby_key_g_bodies[idx]
+    }
+
+    /// Returns the prepared final `key_h` body.
+    pub fn key_h(&self) -> &GGLWEPrepared<BE::OwnedBuf, BE> {
+        &self.key_h_body
+    }
+
+    /// Output size of the key products, used to size online scratch buffers.
+    pub fn key_size(&self) -> usize {
+        self.key_h().size()
+    }
+}
+
+impl<BE> PackingKeysGenerate<BE> for Module<BE>
+where
+    // Compressed keys are host-side `Vec<u8>` buffers (see the compressed alloc
+    // and `GLWEAutomorphismKeyCompressedEncryptSk` impl bounds), consistent with
+    // the rest of the crate's compressed-buffer code.
+    BE: Backend<OwnedBuf = Vec<u8>>,
+    Module<BE>: ModuleCoreAlloc<OwnedBuf = BE::OwnedBuf>
+        + ModuleCoreCompressedAlloc
+        + GLWEAutomorphismKeyCompressedEncryptSk<BE>
+        + GaloisElement
+        + ScalarZnxAutomorphismBackend<BE>,
+{
+    fn pack_keys_generate_tmp_bytes<E>(&self, key_infos: &E) -> usize
+    where
+        E: GGLWEInfos,
+    {
+        self.glwe_automorphism_key_compressed_encrypt_sk_tmp_bytes(key_infos)
+    }
+
+    fn pack_keys_generate<E, S>(
+        &self,
+        key_infos: &E,
+        sk_lwe: &S,
+        key_seed: [u8; 32],
+        source_xe: &mut Source,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) -> (
+        GLWEAutomorphismKeyCompressed<Vec<u8>>,
+        GLWEAutomorphismKeyCompressed<Vec<u8>>,
+    )
+    where
+        E: EncryptionInfos + GGLWEInfos,
+        S: LWESecretToBackendRef<BE>,
+    {
+        // The natural automorphism keys are signed under the raw LWE secret
+        // wrapped (identity automorphism) into a rank-1 GLWE polynomial key.
+        let sk_base = wrap_lwe_secret(self, sk_lwe);
+
+        // These must match the rotations the server-side precompute realigns
+        // against; see `pack_keys_precompute_default`.
+        let key_g_rotation = self.galois_element_inv(self.galois_element(1));
+        let key_h_rotation = -1i64;
+
+        let mut key_g = self.glwe_automorphism_key_compressed_alloc_from_infos(key_infos);
+        self.glwe_automorphism_key_compressed_encrypt_sk(
+            &mut key_g,
+            key_g_rotation,
+            &sk_base,
+            key_seed,
+            key_infos,
+            source_xe,
+            &mut scratch.borrow(),
+        );
+
+        let mut key_h = self.glwe_automorphism_key_compressed_alloc_from_infos(key_infos);
+        self.glwe_automorphism_key_compressed_encrypt_sk(
+            &mut key_h,
+            key_h_rotation,
+            &sk_base,
+            key_seed,
+            key_infos,
+            source_xe,
+            &mut scratch.borrow(),
+        );
+
+        (key_g, key_h)
+    }
+}
+
+/// Wraps a raw LWE secret into the rank-1 GLWE polynomial key (`sk_base`) that
+/// the packing automorphism keys are signed under.
+///
+/// Unlike [`poulpy_core::SecretConversion::glwe_secret_from_lwe_secret`] (which
+/// applies the `X -> X^{-1}` automorphism `p = -1`), packing keys are signed
+/// under the secret in its natural orientation, so this uses the identity
+/// automorphism `p = 1`.
+fn wrap_lwe_secret<BE, S>(module: &Module<BE>, sk_lwe: &S) -> GLWESecret<BE::OwnedBuf>
+where
+    BE: Backend<OwnedBuf = Vec<u8>>,
+    Module<BE>: ModuleCoreAlloc<OwnedBuf = BE::OwnedBuf> + ScalarZnxAutomorphismBackend<BE>,
+    S: LWESecretToBackendRef<BE>,
+{
+    let src = sk_lwe.to_backend_ref();
+    assert_eq!(
+        src.n().as_usize(),
+        module.n(),
+        "LWE secret degree must equal module degree"
+    );
+    let mut sk_base = module.glwe_secret_alloc(Rank(1));
+    // `fill_zero` clears the data and, crucially, sets a non-`NONE` distribution
+    // tag so the automorphism-key encryption guard accepts the key; the actual
+    // secret coefficients are written over column 0 by the identity automorphism
+    // below. There is no public setter to copy the LWE secret's exact
+    // distribution, and the encryption uses the provided coefficients directly.
+    sk_base.fill_zero();
+    {
+        let mut res_ref = GLWESecretToBackendMut::<BE>::to_backend_mut(&mut sk_base);
+        module.scalar_znx_automorphism_backend(1, res_ref.data_mut(), 0, src.data(), 0);
+    }
+    sk_base
+}
 
 /// Scratch estimate for [`packing_keys_precompute`].
 ///
@@ -64,7 +209,7 @@ pub(crate) fn pack_keys_precompute_default<BE, KG, KH>(
     key_h: &KH,
     baby_size: usize,
     scratch: &mut ScratchArena<'_, BE>,
-) -> PackingKeyPrecomputations<GGLWEPrepared<BE::OwnedBuf, BE>>
+) -> PackingKeys<BE>
 where
     BE: Backend,
     Module<BE>: GGLWEPreparedFactory<BE>
@@ -93,7 +238,7 @@ where
         prepare_baby_body_keys_from_compressed(module, key_g, key_g_rotation, baby_size, scratch);
     let key_h_body = prepare_body_key_from_compressed(module, key_h, key_h_rotation, scratch);
 
-    PackingKeyPrecomputations::new(baby_key_g_bodies, key_h_body)
+    PackingKeys::new(baby_key_g_bodies, key_h_body)
 }
 
 /// Scratch estimate for preparing both fixed seed-derived mask keys.

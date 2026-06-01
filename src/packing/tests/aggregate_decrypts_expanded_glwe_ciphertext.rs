@@ -95,7 +95,7 @@ where
         .glwe_encrypt_sk_tmp_bytes(&glwe_infos)
         .max(module.glwe_decrypt_tmp_bytes(&glwe_infos))
         .max(module.glwe_expand_lwe_matrix_tmp_bytes(&matrix_infos, &glwe_infos))
-        .max(module.packing_mask_aggregate_tmp_bytes(matrix_infos.size()))
+        .max(module.packing_mask_preprocessing_tmp_bytes(matrix_infos.size()))
         .max(1 << 20);
     let mut scratch = ScratchOwned::<BE>::alloc(scratch_bytes);
 
@@ -231,9 +231,9 @@ where
 
     let mut aggregate = module.vec_znx_alloc(n, size);
 
-    print!("start: packing_mask_aggregate");
+    print!("start: packing_mask_preprocessing");
     let now = Instant::now();
-    module.packing_mask_aggregate(
+    module.packing_mask_preprocessing(
         &mut aggregate,
         base2k.as_usize(),
         lwe_matrix.mask(),
@@ -246,6 +246,6 @@ where
 }
 
 #[test]
-fn packing_mask_aggregate_decrypts_expanded_glwe_ciphertext() {
+fn packing_mask_preprocessing_decrypts_expanded_glwe_ciphertext() {
     run::<FFT64Avx>();
 }
