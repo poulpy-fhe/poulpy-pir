@@ -34,7 +34,9 @@ const PACK_PRECOMPUTE_ARITHMETIC_BASE2K: usize = 50;
 /// will require.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackingPrecomputeInfos {
-    /// Total stored mask steps, including the final `key_h` step.
+    /// Total stored mask steps. For full packing this is all `key_g` collapse
+    /// steps plus the final `key_h` step; for partial packing it is the `γ-1`
+    /// `key_g` steps only (no `key_h`).
     steps: usize,
     /// Number of limbs/components in each stored mask column.
     size: usize,
@@ -42,17 +44,55 @@ pub struct PackingPrecomputeInfos {
     base2k: usize,
     /// Number of baby steps per giant-step group.
     baby_size: usize,
+    /// Partial packing (Algorithm 2): a single `key_g` collapse half over `γ`
+    /// coefficients, with no second half and no final `key_h` step.
+    partial: bool,
+    /// Galois generator stride `e = (d/2)/γ`. The packing automorphisms use the
+    /// generator `g_γ = 5^e` (order `γ`), so every `galois_element(x)` becomes
+    /// `galois_element(e·x)`. Full packing has `γ = d/2`, hence `e = 1`.
+    stride: usize,
 }
 
 impl PackingPrecomputeInfos {
-    /// Creates a metadata value matching [`pack_precompute_alloc_default`].
+    /// Creates full-packing metadata matching [`pack_precompute_alloc_default`].
     pub fn new(steps: usize, size: usize, base2k: usize, baby_size: usize) -> Self {
         Self {
             steps,
             size,
             base2k,
             baby_size,
+            partial: false,
+            stride: 1,
         }
+    }
+
+    /// Creates partial-packing metadata: `steps = γ-1` `key_g` steps, no `key_h`,
+    /// with Galois generator stride `e = (d/2)/γ`.
+    pub fn new_partial(
+        steps: usize,
+        size: usize,
+        base2k: usize,
+        baby_size: usize,
+        stride: usize,
+    ) -> Self {
+        Self {
+            steps,
+            size,
+            base2k,
+            baby_size,
+            partial: true,
+            stride,
+        }
+    }
+
+    /// Whether this is a partial (single-half, no-`key_h`) packing layout.
+    pub fn partial(self) -> bool {
+        self.partial
+    }
+
+    /// Galois generator stride `e = (d/2)/γ` (1 for full packing).
+    pub fn stride(self) -> usize {
+        self.stride
     }
 
     /// Total stored mask steps, including the final `key_h` step.
@@ -87,7 +127,17 @@ pub(crate) fn arithmetic_precompute_metadata(
     let base2k = PACK_PRECOMPUTE_ARITHMETIC_BASE2K.max(metadata.base2k);
     let torus_bits = metadata.size * metadata.base2k;
     let size = torus_bits.div_ceil(base2k).max(1);
-    PackingPrecomputeInfos::new(metadata.steps, size, base2k, metadata.baby_size)
+    if metadata.partial {
+        PackingPrecomputeInfos::new_partial(
+            metadata.steps,
+            size,
+            base2k,
+            metadata.baby_size,
+            metadata.stride,
+        )
+    } else {
+        PackingPrecomputeInfos::new(metadata.steps, size, base2k, metadata.baby_size)
+    }
 }
 
 /// Fixed mask-side state produced before online packing.
@@ -109,14 +159,39 @@ pub struct PackingPrecomputations<BE: Backend> {
     bsgs_baby_size: usize,
     /// Base used when normalizing big products back into coefficient buffers.
     base2k: usize,
-    /// Total stored mask steps, including the final `key_h` step.
+    /// Total stored mask steps (includes the final `key_h` step iff `!partial`).
     steps: usize,
+    /// Partial packing: single `key_g` collapse half, no second half, no `key_h`.
+    partial: bool,
+    /// Galois generator stride `e = (d/2)/γ` (1 for full packing); see
+    /// [`PackingPrecomputeInfos::stride`].
+    stride: usize,
 }
 
 impl<BE: Backend> PackingPrecomputations<BE> {
     /// Allocation-free metadata matching this concrete precompute container.
     pub fn metadata(&self) -> PackingPrecomputeInfos {
-        PackingPrecomputeInfos::new(self.steps, self.size(), self.base2k, self.bsgs_baby_size)
+        if self.partial {
+            PackingPrecomputeInfos::new_partial(
+                self.steps,
+                self.size(),
+                self.base2k,
+                self.bsgs_baby_size,
+                self.stride,
+            )
+        } else {
+            PackingPrecomputeInfos::new(self.steps, self.size(), self.base2k, self.bsgs_baby_size)
+        }
+    }
+
+    /// Whether this is a partial (single-half, no-`key_h`) packing layout.
+    pub(crate) fn partial(&self) -> bool {
+        self.partial
+    }
+
+    /// Galois generator stride `e = (d/2)/γ` (1 for full packing).
+    pub(crate) fn stride(&self) -> usize {
+        self.stride
     }
 
     /// Per-step fixed mask inputs for the online body-side `1 x 1` VMPs.
@@ -165,18 +240,27 @@ impl<BE: Backend> PackingPrecomputations<BE> {
         self.bsgs_baby_size
     }
 
-    /// Number of `key_g` collapse steps.
-    ///
-    /// The remaining stored step is the final `key_h` step.
+    /// Number of `key_g` collapse steps. For full packing the remaining stored
+    /// step is the final `key_h` step (`steps - 1`); for partial packing all
+    /// stored steps are `key_g` steps (`steps`).
     pub(crate) fn bsgs_kg_steps(&self) -> usize {
-        self.steps - 1
+        if self.partial {
+            self.steps
+        } else {
+            self.steps - 1
+        }
     }
 
-    /// Number of `key_g` steps in each half of the split collapse.
+    /// Number of `key_g` steps in each half of the split collapse. Partial
+    /// packing has a single half holding all `key_g` steps.
     ///
     /// Used to derive group starts without storing a per-group schedule.
     pub(crate) fn bsgs_half_steps(&self) -> usize {
-        self.bsgs_kg_steps() / 2
+        if self.partial {
+            self.bsgs_kg_steps()
+        } else {
+            self.bsgs_kg_steps() / 2
+        }
     }
 
     /// Number of giant-step groups in one half.
@@ -187,9 +271,14 @@ impl<BE: Backend> PackingPrecomputations<BE> {
         self.bsgs_half_steps().div_ceil(self.bsgs_baby_size)
     }
 
-    /// Total number of giant-step groups across both halves.
+    /// Total number of giant-step groups: two halves for full packing, a single
+    /// half for partial packing.
     pub(crate) fn bsgs_group_count(&self) -> usize {
-        2 * self.bsgs_groups_per_half()
+        if self.partial {
+            self.bsgs_groups_per_half()
+        } else {
+            2 * self.bsgs_groups_per_half()
+        }
     }
 
     /// First collapse step covered by `group_idx`.
@@ -252,6 +341,32 @@ pub(crate) fn pack_precompute_alloc_default<BE: Backend>(
         bsgs_baby_size: baby_size,
         base2k,
         steps,
+        partial: false,
+        stride: 1,
+    }
+}
+
+/// Allocates fixed mask-side storage for **partial** packing: `steps = γ-1`
+/// `key_g` collapse steps, a single half, and no final `key_h` step. `stride` is
+/// the Galois generator stride `e = (d/2)/γ`.
+pub(crate) fn pack_precompute_alloc_partial<BE: Backend>(
+    module: &Module<BE>,
+    steps: usize,
+    size: usize,
+    base2k: usize,
+    baby_size: usize,
+    stride: usize,
+) -> PackingPrecomputations<BE> {
+    PackingPrecomputations {
+        body_vmp_masks: module.vec_znx_alloc(steps, size),
+        final_mask: module.vec_znx_alloc(1, size),
+        bsgs_masks: Vec::new(),
+        bsgs_giant_plans: Vec::new(),
+        bsgs_baby_size: baby_size,
+        base2k,
+        steps,
+        partial: true,
+        stride,
     }
 }
 
@@ -314,28 +429,41 @@ where
     VecZnx::<Vec<u8>>::bytes_of(module.n(), 1, metadata.size()).next_multiple_of(BE::SCRATCH_ALIGN)
 }
 
-/// Precomputes the fixed-mask side of the sequential split collapse.
+/// Precomputes the fixed-mask side of the sequential collapse, unifying full and
+/// partial packing.
 ///
-/// The loop order and automorphisms mirror
+/// This is the first internal phase of
+/// [`Packing::pack_precompute`](crate::packing::Packing::pack_precompute). The
+/// second phase turns the recorded schedule into DFT-hot BSGS columns and
+/// automorphism plans. The loop order and automorphisms mirror
 /// `sequential_keyswitch_collapse_aggregate_mask_split`: the only difference is
 /// that the input mask is fixed, so the mask-key `1 x 1` products are applied
 /// to an offline mask state. Before each offline mask product, the routine also
 /// records the fixed mask input required by the corresponding online body-side
 /// product. The key body is query-dependent and is not part of this precompute.
 ///
-/// This is the first internal phase of
-/// [`Packing::pack_precompute`](crate::packing::Packing::pack_precompute). The
-/// second phase turns the recorded schedule into DFT-hot BSGS columns and
-/// automorphism plans.
+/// The collapse is a sequence of `key_g` half-collapses (`precompute_collapse_half`),
+/// one per half, mirroring Algorithm 1's `COLLAPSE = COLLAPSEHALF + … + merge`:
+///
+/// * **Partial** packing runs a single half over `γ` columns (generator stride
+///   `e = (d/2)/γ`), with `key_h_mask = None`. The surviving column 0 is the
+///   result mask.
+/// * **Full** packing runs two halves over `d/2` columns each (stride 1): the
+///   first with `ρ = I` (its result is saved as the `first_share`), the second
+///   with `ρ = τ_h`, then a final `key_h` merge adds the `key_h` product of the
+///   second half's result to the `first_share`.
+///
+/// `key_g_mask` and `key_h_mask` share the same prepared-key type; partial
+/// packing passes `None` for the latter.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn precompute_sequential_keyswitch_collapse_aggregate_mask<BE, A, KGMask, KHMask>(
+pub(crate) fn precompute_collapse_mask<BE, A, K>(
     module: &Module<BE>,
     precompute: &mut PackingPrecomputations<BE>,
     aggregate_mask: &A,
     vmp_input_base2k: usize,
     vmp_input_size: usize,
-    key_g_mask: &KGMask,
-    key_h_mask: &KHMask,
+    key_g_mask: &K,
+    key_h_mask: Option<&K>,
     scratch: &mut ScratchArena<'_, BE>,
 ) where
     BE: Backend,
@@ -351,15 +479,22 @@ pub(crate) fn precompute_sequential_keyswitch_collapse_aggregate_mask<BE, A, KGM
         + VecZnxNormalize<BE>
         + VmpApplyDftToDft<BE>,
     A: VecZnxToBackendRef<BE> + ZnxInfos,
-    KGMask: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos,
-    KHMask: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos,
-    for<'a> ScratchArena<'a, BE>: ScratchArenaTakeBasic<'a, BE>,
+    K: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos,
 {
     let n = module.n();
-    let half = n >> 1;
+    // Each half collapses `per_half_cols = half_steps + 1` aggregate columns; full
+    // packing has two halves of `d/2`, partial a single half of `γ`.
+    let per_half_cols = precompute.bsgs_half_steps() + 1;
+    let num_halves = if precompute.partial() { 1 } else { 2 };
+    assert!(per_half_cols <= n >> 1, "collapse half exceeds d/2 columns");
+    assert!(
+        aggregate_mask.cols() >= num_halves * per_half_cols,
+        "aggregate has fewer columns than the collapse schedule requires"
+    );
+
     let scratch_local = scratch.borrow();
-    let (mut half_work, scratch_local) =
-        scratch_local.take_vec_znx_scratch(n, half, aggregate_mask.size());
+    let (mut work, scratch_local) =
+        scratch_local.take_vec_znx_scratch(n, per_half_cols, aggregate_mask.size());
     let (mut first_share, scratch_local) =
         scratch_local.take_vec_znx_scratch(n, 1, aggregate_mask.size());
     let (mut term_mask, scratch_local) =
@@ -374,75 +509,75 @@ pub(crate) fn precompute_sequential_keyswitch_collapse_aggregate_mask<BE, A, KGM
     let aggregate_ref = aggregate_mask.to_backend_ref();
     let mut step = 0usize;
 
-    copy_aggregate_half(module, &mut half_work, &aggregate_ref, 0);
-    precompute_collapse_half(
-        module,
-        precompute,
-        &mut half_work,
-        false,
-        key_g_mask,
-        vmp_input_base2k,
-        &mut step,
-        &mut term_mask,
-        &mut term_mask_vmp,
-        &mut mask_addend,
-        &mut mask_addend_auto,
-        &mut scratch_local,
-    );
-
-    {
-        let half_ref = half_work.to_backend_ref();
-        let mut first_mut = first_share.to_backend_mut();
-        module.vec_znx_copy_backend(&mut first_mut, 0, &half_ref, 0);
-    }
-
-    copy_aggregate_half(module, &mut half_work, &aggregate_ref, half);
-    precompute_collapse_half(
-        module,
-        precompute,
-        &mut half_work,
-        true,
-        key_g_mask,
-        vmp_input_base2k,
-        &mut step,
-        &mut term_mask,
-        &mut term_mask_vmp,
-        &mut mask_addend,
-        &mut mask_addend_auto,
-        &mut scratch_local,
-    );
-
-    {
-        let half_ref = half_work.to_backend_ref();
-        let mut term_mut = term_mask.to_backend_mut();
-        module.vec_znx_copy_backend(&mut term_mut, 0, &half_ref, 0);
-    }
-    store_body_vmp_mask(module, precompute, step, &term_mask);
-    normalize_term_for_vmp(
-        module,
-        &mut term_mask_vmp,
-        vmp_input_base2k,
-        &term_mask,
-        precompute.base2k(),
-        &mut scratch_local.borrow(),
-    );
-    fixed_mask_1x1_vmp_body_addend(
-        module,
-        &mut mask_addend,
-        precompute.base2k(),
-        &term_mask_vmp,
-        0,
-        key_h_mask,
-        &mut scratch_local.borrow(),
-    );
-    {
-        let mask_ref = mask_addend.to_backend_ref();
-        let first_ref = first_share.to_backend_ref();
-        let mut final_mut = <VecZnx<BE::OwnedBuf> as VecZnxToBackendMut<BE>>::to_backend_mut(
-            precompute.final_mask_mut(),
+    for half_idx in 0..num_halves {
+        let use_tau_h = half_idx == 1;
+        copy_aggregate_half(module, &mut work, &aggregate_ref, half_idx * per_half_cols);
+        precompute_collapse_half(
+            module,
+            precompute,
+            &mut work,
+            use_tau_h,
+            key_g_mask,
+            vmp_input_base2k,
+            &mut step,
+            &mut term_mask,
+            &mut term_mask_vmp,
+            &mut mask_addend,
+            &mut mask_addend_auto,
+            &mut scratch_local,
         );
-        module.vec_znx_copy_backend(&mut final_mut, 0, &mask_ref, 0);
-        module.vec_znx_add_assign_backend(&mut final_mut, 0, &first_ref, 0);
+
+        // Save the first (`ρ = I`) half's result; the `key_h` merge needs it.
+        if half_idx == 0 && num_halves == 2 {
+            let work_ref = work.to_backend_ref();
+            let mut first_mut = first_share.to_backend_mut();
+            module.vec_znx_copy_backend(&mut first_mut, 0, &work_ref, 0);
+        }
+    }
+
+    // `work` column 0 now holds the last half's collapsed mask.
+    match key_h_mask {
+        // Partial: the surviving column 0 is the result, no merge.
+        None => {
+            let work_ref = work.to_backend_ref();
+            let mut final_mut = <VecZnx<BE::OwnedBuf> as VecZnxToBackendMut<BE>>::to_backend_mut(
+                precompute.final_mask_mut(),
+            );
+            module.vec_znx_copy_backend(&mut final_mut, 0, &work_ref, 0);
+        }
+        // Full: merge the τ_h half via key_h, then add the saved first_share.
+        Some(key_h_mask) => {
+            {
+                let work_ref = work.to_backend_ref();
+                let mut term_mut = term_mask.to_backend_mut();
+                module.vec_znx_copy_backend(&mut term_mut, 0, &work_ref, 0);
+            }
+            store_body_vmp_mask(module, precompute, step, &term_mask);
+            normalize_term_for_vmp(
+                module,
+                &mut term_mask_vmp,
+                vmp_input_base2k,
+                &term_mask,
+                precompute.base2k(),
+                &mut scratch_local.borrow(),
+            );
+            fixed_mask_1x1_vmp_body_addend(
+                module,
+                &mut mask_addend,
+                precompute.base2k(),
+                &term_mask_vmp,
+                0,
+                key_h_mask,
+                &mut scratch_local.borrow(),
+            );
+            let mask_ref = mask_addend.to_backend_ref();
+            let first_ref = first_share.to_backend_ref();
+            let mut final_mut = <VecZnx<BE::OwnedBuf> as VecZnxToBackendMut<BE>>::to_backend_mut(
+                precompute.final_mask_mut(),
+            );
+            module.vec_znx_copy_backend(&mut final_mut, 0, &mask_ref, 0);
+            module.vec_znx_add_assign_backend(&mut final_mut, 0, &first_ref, 0);
+        }
     }
 }
 
@@ -527,11 +662,12 @@ fn precompute_collapse_half<BE, Mask, TermMask, TermMaskVmp, MaskAddend, MaskAdd
     MaskAddend: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE> + ZnxInfos,
     MaskAddendAuto: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE> + ZnxInfos,
     KMask: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos,
-    for<'a> ScratchArena<'a, BE>: ScratchArenaTakeBasic<'a, BE>,
 {
+    let stride = precompute.stride();
     for target_col in (0..mask.cols() - 1).rev() {
         let source_col = target_col + 1;
-        let tau_g_j = module.galois_element(target_col as i64);
+        let tau_g_j =
+            module.galois_element_inv(module.galois_element((stride * target_col) as i64));
         let secret_view = if use_tau_h { -tau_g_j } else { tau_g_j };
         let alpha = module.galois_element_inv(secret_view);
         let alpha_inv = secret_view;
@@ -766,7 +902,6 @@ fn fixed_mask_1x1_vmp_body_addend<BE, M, R, A, K>(
     R: VecZnxToBackendMut<BE> + ZnxInfos,
     A: VecZnxToBackendRef<BE> + ZnxInfos,
     K: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos,
-    for<'a> ScratchArena<'a, BE>: ScratchArenaTakeBasic<'a, BE>,
 {
     let key_size = key.size();
     let key_base2k = key.base2k().as_usize();
@@ -825,6 +960,7 @@ fn sequential_collapse_bsgs_giant_alpha<BE>(
     half_steps: usize,
     baby_size: usize,
     group_idx: usize,
+    stride: usize,
 ) -> i64
 where
     BE: Backend,
@@ -834,7 +970,7 @@ where
     let use_tau_h = group_idx >= groups_per_half;
     let giant_idx = group_idx % groups_per_half;
     let target_col = half_steps - 1 - giant_idx * baby_size;
-    let tau_g_j = module.galois_element(target_col as i64);
+    let tau_g_j = module.galois_element_inv(module.galois_element((stride * target_col) as i64));
     let secret_view = if use_tau_h { -tau_g_j } else { tau_g_j };
     module.galois_element_inv(secret_view)
 }
@@ -846,7 +982,7 @@ where
 ///
 /// This is the implementation behind [`Packing::pack_precompute`](crate::packing::Packing::pack_precompute).
 /// It consumes the coefficient-domain columns recorded by
-/// [`precompute_sequential_keyswitch_collapse_aggregate_mask`], applies the
+/// [`precompute_collapse_mask`], applies the
 /// baby-step automorphisms, converts them to DFT, and prepares the giant-step
 /// plans used in `bsgs_pack`. The plans are stored type-erased so the public
 /// [`PackingPrecomputations`] type does not require HAL automorphism-plan
@@ -864,13 +1000,14 @@ pub(crate) fn sequential_collapse_bsgs_dft_build<BE>(
         + VecZnxDftAutomorphismPlan<BE>,
     VecZnx<BE::OwnedBuf>: VecZnxToBackendRef<BE>,
     <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static,
-    for<'a> ScratchArena<'a, BE>: ScratchArenaTakeBasic<'a, BE>,
 {
     let n = module.n();
-    let half = n >> 1;
-    let kg_steps = 2 * (half - 1);
+    // Full packing: `2 * (n/2 - 1)` key_g steps + a final key_h step. Partial
+    // packing: `γ-1` key_g steps and no key_h step.
+    let kg_steps = precompute.bsgs_kg_steps();
     let baby_size = precompute.bsgs_baby_size();
 
+    let stride = precompute.stride();
     let group_count = precompute.bsgs_group_count();
     let mut giant_plans: Vec<Box<dyn Any>> = Vec::with_capacity(group_count);
     for group_idx in 0..group_count {
@@ -879,6 +1016,7 @@ pub(crate) fn sequential_collapse_bsgs_dft_build<BE>(
             precompute.bsgs_half_steps(),
             baby_size,
             group_idx,
+            stride,
         );
         giant_plans.push(Box::new(module.vec_znx_dft_automorphism_plan(giant_alpha)));
     }
@@ -896,7 +1034,8 @@ pub(crate) fn sequential_collapse_bsgs_dft_build<BE>(
             let start_step = precompute.bsgs_group_start_step(group_idx);
             for baby_idx in 0..precompute.bsgs_group_len(group_idx) {
                 let step = start_step + baby_idx;
-                let baby_alpha = module.galois_element(baby_idx as i64);
+                let baby_alpha =
+                    module.galois_element_inv(module.galois_element((stride * baby_idx) as i64));
                 // Convert each sequential step into the baby-step view expected
                 // by the corresponding client-key-side baby key.
                 module.vec_znx_automorphism_backend(
@@ -918,15 +1057,18 @@ pub(crate) fn sequential_collapse_bsgs_dft_build<BE>(
         }
 
         // The final `key_h` product is not part of the BSGS `key_g` grouping,
-        // but it uses the same DFT-hot mask storage.
-        module.vec_znx_dft_apply(
-            1,
-            0,
-            &mut masks[kg_steps].to_backend_mut(),
-            0,
-            &src_ref,
-            kg_steps,
-        );
+        // but it uses the same DFT-hot mask storage. Partial packing has no
+        // `key_h` step, so its mask storage ends at the last `key_g` column.
+        if !precompute.partial() {
+            module.vec_znx_dft_apply(
+                1,
+                0,
+                &mut masks[kg_steps].to_backend_mut(),
+                0,
+                &src_ref,
+                kg_steps,
+            );
+        }
     }
 
     precompute.bsgs_masks = masks;

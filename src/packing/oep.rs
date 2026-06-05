@@ -41,6 +41,25 @@ pub unsafe trait PackingMaskAggregationImpl<BE: Backend>: Backend {
     ) where
         R: VecZnxToBackendMut<BE> + ZnxInfos,
         A: VecZnxToBackendRef<BE> + ZnxInfos;
+
+    /// Backend hook for partial packing-mask aggregation scratch estimation.
+    fn pack_partial_mask_preprocessing_tmp_bytes_impl(
+        module: &Module<BE>,
+        gamma: usize,
+        size: usize,
+    ) -> usize;
+
+    /// Backend hook for partial packing-mask aggregation.
+    fn pack_partial_mask_preprocessing_impl<R, A>(
+        module: &Module<BE>,
+        dst: &mut R,
+        base2k: usize,
+        gamma: usize,
+        a: &A,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos;
 }
 
 #[allow(private_bounds)]
@@ -63,6 +82,28 @@ where
         A: VecZnxToBackendRef<BE> + ZnxInfos,
     {
         module.packing_mask_preprocessing_default(dst, base2k, a, scratch);
+    }
+
+    fn pack_partial_mask_preprocessing_tmp_bytes_impl(
+        module: &Module<BE>,
+        gamma: usize,
+        size: usize,
+    ) -> usize {
+        module.packing_mask_preprocessing_partial_tmp_bytes_default(gamma, size)
+    }
+
+    fn pack_partial_mask_preprocessing_impl<R, A>(
+        module: &Module<BE>,
+        dst: &mut R,
+        base2k: usize,
+        gamma: usize,
+        a: &A,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos,
+    {
+        module.packing_mask_preprocessing_partial_default(dst, base2k, gamma, a, scratch);
     }
 }
 
@@ -99,6 +140,17 @@ pub unsafe trait PackingImpl<BE: Backend>: Backend {
         KG: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement,
         KH: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement;
 
+    /// Backend hook for partial client-key-side precompute.
+    fn pack_partial_keys_precompute_impl<KG>(
+        module: &Module<BE>,
+        key_g: &KG,
+        stride: usize,
+        baby_size: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) -> PackingKeys<BE>
+    where
+        KG: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement;
+
     /// Backend hook for fixed mask-side allocation.
     fn pack_precompute_alloc_impl(
         module: &Module<BE>,
@@ -106,6 +158,16 @@ pub unsafe trait PackingImpl<BE: Backend>: Backend {
         size: usize,
         base2k: usize,
         baby_size: usize,
+    ) -> PackingPrecomputations<BE>;
+
+    /// Backend hook for partial fixed mask-side allocation.
+    fn pack_partial_precompute_alloc_impl(
+        module: &Module<BE>,
+        steps: usize,
+        size: usize,
+        base2k: usize,
+        baby_size: usize,
+        stride: usize,
     ) -> PackingPrecomputations<BE>;
 
     /// Backend hook for fixed mask-side precompute scratch estimation.
@@ -121,6 +183,17 @@ pub unsafe trait PackingImpl<BE: Backend>: Backend {
 
     /// Backend hook for fixed mask-side precompute.
     fn pack_precompute_impl<A, KMask>(
+        module: &Module<BE>,
+        precomputations: &mut PackingPrecomputations<BE>,
+        aggregate_mask: &A,
+        key_mask_source: &KMask,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        A: VecZnxToBackendRef<BE> + ZnxInfos,
+        KMask: GGLWECompressedSeed + GGLWEInfos;
+
+    /// Backend hook for partial fixed mask-side precompute.
+    fn pack_partial_precompute_impl<A, KMask>(
         module: &Module<BE>,
         precomputations: &mut PackingPrecomputations<BE>,
         aggregate_mask: &A,
@@ -176,6 +249,19 @@ where
         module.pack_keys_precompute_default(key_g, key_h, baby_size, scratch)
     }
 
+    fn pack_partial_keys_precompute_impl<KG>(
+        module: &Module<BE>,
+        key_g: &KG,
+        stride: usize,
+        baby_size: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) -> PackingKeys<BE>
+    where
+        KG: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement,
+    {
+        module.pack_partial_keys_precompute_default(key_g, stride, baby_size, scratch)
+    }
+
     fn pack_precompute_alloc_impl(
         module: &Module<BE>,
         steps: usize,
@@ -184,6 +270,17 @@ where
         baby_size: usize,
     ) -> PackingPrecomputations<BE> {
         module.pack_precompute_alloc_default(steps, size, base2k, baby_size)
+    }
+
+    fn pack_partial_precompute_alloc_impl(
+        module: &Module<BE>,
+        steps: usize,
+        size: usize,
+        base2k: usize,
+        baby_size: usize,
+        stride: usize,
+    ) -> PackingPrecomputations<BE> {
+        module.pack_precompute_alloc_partial_default(steps, size, base2k, baby_size, stride)
     }
 
     fn pack_precompute_tmp_bytes_impl<A, KMask>(
@@ -210,6 +307,24 @@ where
         KMask: GGLWECompressedSeed + GGLWEInfos,
     {
         module.pack_precompute_default(precomputations, aggregate_mask, key_mask_source, scratch);
+    }
+
+    fn pack_partial_precompute_impl<A, KMask>(
+        module: &Module<BE>,
+        precomputations: &mut PackingPrecomputations<BE>,
+        aggregate_mask: &A,
+        key_mask_source: &KMask,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        A: VecZnxToBackendRef<BE> + ZnxInfos,
+        KMask: GGLWECompressedSeed + GGLWEInfos,
+    {
+        module.pack_precompute_partial_default(
+            precomputations,
+            aggregate_mask,
+            key_mask_source,
+            scratch,
+        );
     }
 
     fn pack_impl<R, B>(

@@ -13,19 +13,12 @@ use poulpy_hal::{
 
 use crate::interpolation::MonomialInterpolation;
 
-fn select_ref<T>(value: &T) -> &T {
-    value
-}
-
-fn select_mut<T>(value: &mut T) -> &mut T {
-    value
-}
-
 /// Each `y_k` carries `cols` independent channels. Interpolating them one column
 /// at a time over the *same* slice must recover each channel exactly, proving the
 /// column-local bit-reversal does not corrupt neighbouring columns. This is the
 /// property `Interpolation::prepare` relies on when it interpolates every
 /// mask column of a shared `LWEMatrix`.
+#[allow(clippy::needless_range_loop)]
 fn run<BE>()
 where
     BE: Backend,

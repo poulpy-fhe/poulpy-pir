@@ -32,19 +32,29 @@ use crate::packing::PackingKeysGenerate;
 pub struct PackingKeys<BE: Backend> {
     /// Prepared baby-step `key_g` body keys indexed by baby step.
     baby_key_g_bodies: Vec<GGLWEPrepared<BE::OwnedBuf, BE>>,
-    /// Prepared final `key_h` body key.
-    key_h_body: GGLWEPrepared<BE::OwnedBuf, BE>,
+    /// Prepared final `key_h` body key. `None` for partial packing (Algorithm 2),
+    /// which has no `key_h` step.
+    key_h_body: Option<GGLWEPrepared<BE::OwnedBuf, BE>>,
 }
 
 impl<BE: Backend> PackingKeys<BE> {
-    /// Creates owned user-key-side body precomputations.
+    /// Creates owned user-key-side body precomputations for full packing.
     pub fn new(
         baby_key_g_bodies: Vec<GGLWEPrepared<BE::OwnedBuf, BE>>,
         key_h_body: GGLWEPrepared<BE::OwnedBuf, BE>,
     ) -> Self {
         Self {
             baby_key_g_bodies,
-            key_h_body,
+            key_h_body: Some(key_h_body),
+        }
+    }
+
+    /// Creates owned user-key-side body precomputations for partial packing
+    /// (only the baby `key_g` bodies; no `key_h`).
+    pub fn new_partial(baby_key_g_bodies: Vec<GGLWEPrepared<BE::OwnedBuf, BE>>) -> Self {
+        Self {
+            baby_key_g_bodies,
+            key_h_body: None,
         }
     }
 
@@ -53,14 +63,19 @@ impl<BE: Backend> PackingKeys<BE> {
         &self.baby_key_g_bodies[idx]
     }
 
-    /// Returns the prepared final `key_h` body.
+    /// Returns the prepared final `key_h` body (full packing only).
     pub fn key_h(&self) -> &GGLWEPrepared<BE::OwnedBuf, BE> {
-        &self.key_h_body
+        self.key_h_body
+            .as_ref()
+            .expect("key_h is only available for full packing")
     }
 
     /// Output size of the key products, used to size online scratch buffers.
     pub fn key_size(&self) -> usize {
-        self.key_h().size()
+        match &self.key_h_body {
+            Some(key_h) => key_h.size(),
+            None => self.baby_key_g_bodies[0].size(),
+        }
     }
 }
 
@@ -104,7 +119,7 @@ where
 
         // These must match the rotations the server-side precompute realigns
         // against; see `pack_keys_precompute_default`.
-        let key_g_rotation = self.galois_element_inv(self.galois_element(1));
+        let key_g_rotation = self.galois_element(1);
         let key_h_rotation = -1i64;
 
         let mut key_g = self.glwe_automorphism_key_compressed_alloc_from_infos(key_infos);
@@ -130,6 +145,36 @@ where
         );
 
         (key_g, key_h)
+    }
+
+    fn pack_partial_key_generate<E, S>(
+        &self,
+        key_infos: &E,
+        sk_lwe: &S,
+        key_seed: [u8; 32],
+        stride: usize,
+        source_xe: &mut Source,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) -> GLWEAutomorphismKeyCompressed<Vec<u8>>
+    where
+        E: EncryptionInfos + GGLWEInfos,
+        S: LWESecretToBackendRef<BE>,
+    {
+        let sk_base = wrap_lwe_secret(self, sk_lwe);
+        // K_{g_γ} for the order-γ generator g_γ = 5^stride; precompute realigns
+        // it the same way as the full key_g (see `pack_partial_keys_precompute`).
+        let key_g_rotation = self.galois_element(stride as i64);
+        let mut key_g = self.glwe_automorphism_key_compressed_alloc_from_infos(key_infos);
+        self.glwe_automorphism_key_compressed_encrypt_sk(
+            &mut key_g,
+            key_g_rotation,
+            &sk_base,
+            key_seed,
+            key_infos,
+            source_xe,
+            &mut scratch.borrow(),
+        );
+        key_g
     }
 }
 
@@ -195,14 +240,14 @@ where
 /// [`packing_mask_keys_precompute`] during the fixed precompute phase.
 ///
 /// Clients sign their natural automorphism keys with `sk_base` (their raw LWE
-/// secret). The intermediate key-switching shape the collapse expects is
-/// `sk_g -> sk_base` (and `sk_h -> sk_base`), where `sk_g`, `sk_h` are
-/// galois-rotated views of `sk_base`. With `p = g^{-1}`, `sk = sk_base`, the
-/// natural key encrypts `sk_base` under `sk_{g^1}`; rotating the whole key by
-/// `g^{-1}` realigns it to `sk_g -> sk_base`. The same idea with `p = -1`
-/// and rotation by `-1` realigns the `key_h` half. Both rotations are absorbed
-/// once at precompute time and the rest of the packing pipeline stays the
-/// same shape as the historical switching-key path.
+/// secret). poulpy's natural automorphism keys map `s -> π⁻¹(s)`, whereas the
+/// paper's collapse (Algorithm 1) expects `π(s) -> s`, i.e. `sk_g -> sk_base`
+/// (and `sk_h -> sk_base`), where `sk_g`, `sk_h` are galois images of `sk_base`.
+/// Applying `π` to the key (rotation by `g^{+1}` for `key_g`, `-1` for `key_h`)
+/// maps it back to `π(s) -> s`, matching the paper's forward transform
+/// `â[j] = τ_g^{+j}(ã)`. Both rotations are absorbed once at precompute time and
+/// the rest of the packing pipeline stays the same shape as the historical
+/// switching-key path.
 pub(crate) fn pack_keys_precompute_default<BE, KG, KH>(
     module: &Module<BE>,
     key_g: &KG,
@@ -220,13 +265,13 @@ where
     KG: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement,
     KH: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement,
 {
-    let key_g_rotation = module.galois_element_inv(module.galois_element(1));
+    let key_g_rotation = module.galois_element(1);
     let key_h_rotation = -1i64;
     assert_same_mask_seed(key_g, key_h);
     assert_eq!(
         key_g.p(),
         key_g_rotation,
-        "packing key_g must be generated with p = galois_element_inv(galois_element(1))"
+        "packing key_g must be generated with p = galois_element(1)"
     );
     assert_eq!(
         key_h.p(),
@@ -234,11 +279,74 @@ where
         "packing key_h must be generated with p = -1"
     );
 
-    let baby_key_g_bodies =
-        prepare_baby_body_keys_from_compressed(module, key_g, key_g_rotation, baby_size, scratch);
+    let baby_key_g_bodies = prepare_baby_body_keys_from_compressed(
+        module,
+        key_g,
+        key_g_rotation,
+        baby_size,
+        1,
+        scratch,
+    );
     let key_h_body = prepare_body_key_from_compressed(module, key_h, key_h_rotation, scratch);
 
     PackingKeys::new(baby_key_g_bodies, key_h_body)
+}
+
+/// Builds the partial-packing (Algorithm 2) user-key-side baby `key_g` bodies.
+///
+/// `key_g` is `K_{g_γ}` generated with `p = galois_element(stride)` (stride
+/// `= (d/2)/γ`, generator `g_γ = 5^stride` of order γ). There is no `key_h`.
+pub(crate) fn pack_partial_keys_precompute<BE, KG>(
+    module: &Module<BE>,
+    key_g: &KG,
+    stride: usize,
+    baby_size: usize,
+    scratch: &mut ScratchArena<'_, BE>,
+) -> PackingKeys<BE>
+where
+    BE: Backend,
+    Module<BE>: GGLWEPreparedFactory<BE>
+        + GaloisElement
+        + ModuleCoreAlloc<OwnedBuf = BE::OwnedBuf>
+        + VecZnxAutomorphismBackend<BE>
+        + VecZnxCopyBackend<BE>,
+    KG: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement,
+{
+    let key_g_rotation = module.galois_element(stride as i64);
+    assert_eq!(
+        key_g.p(),
+        key_g_rotation,
+        "partial key_g must be generated with p = galois_element(stride)"
+    );
+    let baby_key_g_bodies = prepare_baby_body_keys_from_compressed(
+        module,
+        key_g,
+        key_g_rotation,
+        baby_size,
+        stride,
+        scratch,
+    );
+    PackingKeys::new_partial(baby_key_g_bodies)
+}
+
+/// Prepares the fixed mask-side `key_g` projection for partial packing.
+pub(crate) fn packing_mask_key_precompute_partial<BE, KMask>(
+    module: &Module<BE>,
+    key_mask_source: &KMask,
+    stride: usize,
+    scratch: &mut ScratchArena<'_, BE>,
+) -> GGLWEPrepared<BE::OwnedBuf, BE>
+where
+    BE: Backend,
+    Module<BE>: GGLWEPreparedFactory<BE>
+        + GLWEMaskFillDefault<BE>
+        + GaloisElement
+        + VecZnxAutomorphismBackend<BE>
+        + VecZnxCopyBackend<BE>,
+    KMask: GGLWECompressedSeed + GGLWEInfos,
+{
+    let key_g_rotation = module.galois_element(stride as i64);
+    prepare_mask_key_from_seed(module, key_mask_source, key_g_rotation, scratch)
 }
 
 /// Scratch estimate for preparing both fixed seed-derived mask keys.
@@ -292,7 +400,7 @@ where
         + VecZnxCopyBackend<BE>,
     KMask: GGLWECompressedSeed + GGLWEInfos,
 {
-    let key_g_rotation = module.galois_element_inv(module.galois_element(1));
+    let key_g_rotation = module.galois_element(1);
     let key_h_rotation = -1i64;
     let key_g_mask = prepare_mask_key_from_seed(module, key_mask_source, key_g_rotation, scratch);
     let key_h_mask = prepare_mask_key_from_seed(module, key_mask_source, key_h_rotation, scratch);
@@ -326,6 +434,7 @@ fn prepare_baby_body_keys_from_compressed<BE, K>(
     key: &K,
     rotation: i64,
     baby_size: usize,
+    stride: usize,
     scratch: &mut ScratchArena<'_, BE>,
 ) -> Vec<GGLWEPrepared<BE::OwnedBuf, BE>>
 where
@@ -340,7 +449,8 @@ where
     let mut baby_keys = Vec::with_capacity(baby_size);
 
     for baby_idx in 0..baby_size {
-        let baby_rotation = rotation * module.galois_element(baby_idx as i64);
+        let baby_rotation =
+            rotation * module.galois_element_inv(module.galois_element((stride * baby_idx) as i64));
         baby_keys.push(prepare_body_key_from_compressed(
             module,
             key,

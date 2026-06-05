@@ -6,7 +6,10 @@ mod strategy;
 
 pub use api::*;
 pub use default::{impl_horner_evaluation_default, impl_monomial_interpolation_default};
-pub use strategy::{Interpolated, Interpolation, InterpolationQuery, interpolation_root_exponent};
+pub use strategy::{
+    Interpolated, Interpolation, InterpolationKeys, InterpolationQuery, InterpolationResponse,
+    interpolation_root_exponent,
+};
 
 use poulpy_cpu_avx::FFT64Avx;
 

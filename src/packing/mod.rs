@@ -10,10 +10,12 @@ mod api;
 mod default;
 mod delegates;
 mod oep;
+#[allow(clippy::module_inception)]
 mod packing;
 mod packing_keys;
 mod packing_mask_preprocessing;
 mod packing_precomputations;
+pub(crate) mod recursion;
 
 pub use api::*;
 pub use packing_keys::*;

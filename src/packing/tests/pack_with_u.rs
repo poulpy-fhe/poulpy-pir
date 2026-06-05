@@ -10,12 +10,11 @@ use crate::packing::{
     Packing, PackingKeysGenerate, PackingMaskAggregation, PackingPrecomputeInfos,
 };
 use poulpy_core::{
-    EncryptionLayout, GLWECompressedEncryptSk, GLWEDecrypt, LWEMatrixDecrypt, LWEMatrixMul,
+    EncryptionLayout, GLWECompressedEncryptSk, GLWEDecrypt, GLWEExpandLWEMatrix, LWEMatrixDecrypt,
     layouts::{
-        Base2K, CoeffMatrixInfos, Degree, GGLWEPreparedFactory, GLWEAutomorphismKeyLayout,
-        GLWELayout, GLWEPlaintext, GLWESecret, GLWESecretPreparedFactory, LWEInfos,
-        LWEMatrixLayout, LWESecret, ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank,
-        SecretConversion, TorusPrecision,
+        Base2K, CoeffMatrixInfos, Degree, GLWEAutomorphismKeyLayout, GLWEDecompress, GLWELayout,
+        GLWEPlaintext, GLWESecret, GLWESecretPreparedFactory, LWEInfos, LWEMatrixLayout, LWESecret,
+        ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank, SecretConversion, TorusPrecision,
     },
 };
 use poulpy_cpu_avx::FFT64Avx;
@@ -83,7 +82,7 @@ fn run() {
         base2k: src_infos.base2k(),
         k: src_infos.max_k(),
     };
-    let u_infos = CoeffLayout {
+    let _u_infos = CoeffLayout {
         n: Degree(n as u32),
         rows_out: n,
         base2k: Base2K(base2k as u32),
@@ -107,8 +106,6 @@ fn run() {
             .glwe_compressed_encrypt_sk_tmp_bytes(&src_infos)
             .max(module.glwe_decrypt_tmp_bytes(&src_infos))
             .max(module.lwe_matrix_decrypt_tmp_bytes(&matrix_infos))
-            .max(module.lwe_matrix_mul_mask_tmp_bytes(&matrix_infos, &u_infos, &src_infos))
-            .max(module.lwe_matrix_mul_body_tmp_bytes(&matrix_infos, &u_infos, &src_infos))
             .max(module.packing_mask_preprocessing_tmp_bytes(matrix_infos.size()))
             .max(module.pack_keys_generate_tmp_bytes(&key_infos))
             .max(module.pack_keys_precompute_tmp_bytes(&key_infos, &key_infos, baby_size))
@@ -166,9 +163,15 @@ fn run() {
     }
 
     // product = U * expand(query): mask (precompute side) then body (hot side).
+    // Expand the compressed query to an LWE matrix, then apply U via the test
+    // oracle (the homomorphic `U · query` product, removed from the library).
+    let mut query_glwe = module.glwe_alloc_from_infos(&src_infos);
+    module.decompress_glwe(&mut query_glwe, &query);
+    let mut query_expanded = module.lwe_matrix_alloc_from_infos(&matrix_infos);
+    module.glwe_expand_lwe_matrix(&mut query_expanded, &query_glwe, &mut scratch.borrow());
     let mut product = module.lwe_matrix_alloc_from_infos(&matrix_infos);
-    module.lwe_matrix_mul_mask(&mut product, &u, &query, &mut scratch.borrow());
-    module.lwe_matrix_mul_body(&mut product, &u, &query, &mut scratch.borrow());
+    crate::test_oracle::lwe_matrix_mul_mask(&mut product, &u, &query_expanded);
+    crate::test_oracle::lwe_matrix_mul_body(&mut product, &u, &query_expanded);
 
     // Reference: decrypt the LWE matrix directly under the raw LWE secret.
     let mut ref_pt = module.glwe_plaintext_alloc_from_infos(&src_infos);

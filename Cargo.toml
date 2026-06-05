@@ -5,10 +5,15 @@ edition = "2024"
 
 [dependencies]
 getrandom = "0.4"
+private-gemm-x86 = { version = "=0.1.20", default-features = false }
 poulpy-core = { path = "../poulpy/poulpy-core" }
 poulpy-hal = { path = "../poulpy/poulpy-hal" }
 poulpy-cpu-ref = { path = "../poulpy/poulpy-cpu-ref", features = ["enable-core"] }
 poulpy-cpu-avx = { path = "../poulpy/poulpy-cpu-avx", features = ["enable-avx"] }
+
+[dev-dependencies]
+faer = { version = "0.24", default-features = false, features = ["std"] }
+matrixmultiply = "0.3"
 
 [[bench]]
 name = "packing"
@@ -18,4 +23,9 @@ harness = false
 [[bench]]
 name = "poly_eval"
 path = "benches/poly_eval/main.rs"
+harness = false
+
+[[bench]]
+name = "mask_product"
+path = "benches/mask_product/main.rs"
 harness = false

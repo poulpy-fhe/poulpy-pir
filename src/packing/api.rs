@@ -47,6 +47,22 @@ pub trait PackingMaskAggregation<BE: Backend> {
     ) where
         R: VecZnxToBackendMut<BE> + ZnxInfos,
         A: VecZnxToBackendRef<BE> + ZnxInfos;
+
+    /// Scratch estimate for partial packing-mask aggregation.
+    fn pack_partial_mask_preprocessing_tmp_bytes(&self, gamma: usize, size: usize) -> usize;
+
+    /// Aggregates the first `gamma` LWE mask rows into the partial-packing mask
+    /// layout consumed by [`Packing::pack_partial_precompute`].
+    fn packing_partial_mask_preprocessing<R, A>(
+        &self,
+        dst: &mut R,
+        base2k: usize,
+        gamma: usize,
+        a: &A,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos;
 }
 
 /// Deep-batched BSGS DFT-hot packing.
@@ -86,6 +102,20 @@ pub trait Packing<BE: Backend> {
         KG: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement,
         KH: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement;
 
+    /// Builds user-key-side body material for partial packing.
+    ///
+    /// Partial packing (InsPIRe² Algorithm 2) uses a single `key_g`, generated
+    /// for `galois_element(stride)`, and no `key_h`.
+    fn pack_partial_keys_precompute<KG>(
+        &self,
+        key_g: &KG,
+        stride: usize,
+        baby_size: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) -> PackingKeys<BE>
+    where
+        KG: GGLWECompressedSeed + GGLWECompressedToBackendRef<BE> + GGLWEInfos + GetGaloisElement;
+
     /// Allocates fixed mask-side precomputation storage.
     ///
     /// This is the public entry point for creating [`PackingPrecomputations`];
@@ -97,6 +127,16 @@ pub trait Packing<BE: Backend> {
         size: usize,
         base2k: usize,
         baby_size: usize,
+    ) -> PackingPrecomputations<BE>;
+
+    /// Allocates fixed mask-side storage for partial packing.
+    fn pack_partial_precompute_alloc(
+        &self,
+        steps: usize,
+        size: usize,
+        base2k: usize,
+        baby_size: usize,
+        stride: usize,
     ) -> PackingPrecomputations<BE>;
 
     /// Scratch estimate for [`Packing::pack_precompute`].
@@ -119,6 +159,17 @@ pub trait Packing<BE: Backend> {
     /// columns and giant-step plans used by [`Packing::pack`]. It does not
     /// consume client-key-side body material.
     fn pack_precompute<A, KMask>(
+        &self,
+        precomputations: &mut PackingPrecomputations<BE>,
+        aggregate_mask: &A,
+        key_mask_source: &KMask,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        A: VecZnxToBackendRef<BE> + ZnxInfos,
+        KMask: GGLWECompressedSeed + GGLWEInfos;
+
+    /// Fills fixed mask-side precomputations for partial packing.
+    fn pack_partial_precompute<A, KMask>(
         &self,
         precomputations: &mut PackingPrecomputations<BE>,
         aggregate_mask: &A,
@@ -191,6 +242,22 @@ pub trait PackingKeysGenerate<BE: Backend> {
         GLWEAutomorphismKeyCompressed<Vec<u8>>,
         GLWEAutomorphismKeyCompressed<Vec<u8>>,
     )
+    where
+        E: EncryptionInfos + GGLWEInfos,
+        S: LWESecretToBackendRef<BE>;
+
+    /// Encrypts the single partial-packing automorphism key `K_{g_γ}` under
+    /// `sk_lwe`, for the order-γ generator `g_γ = 5^stride` (stride `= (d/2)/γ`).
+    /// Partial packing (Algorithm 2) uses only this `key_g` and no `key_h`.
+    fn pack_partial_key_generate<E, S>(
+        &self,
+        key_infos: &E,
+        sk_lwe: &S,
+        key_seed: [u8; 32],
+        stride: usize,
+        source_xe: &mut Source,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) -> GLWEAutomorphismKeyCompressed<Vec<u8>>
     where
         E: EncryptionInfos + GGLWEInfos,
         S: LWESecretToBackendRef<BE>;

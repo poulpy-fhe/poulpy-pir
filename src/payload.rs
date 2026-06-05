@@ -1,9 +1,13 @@
 use std::marker::PhantomData;
 
+/// 256-bit payload as 17 base-65535 digits (InsPIRe / interpolation regime).
 pub type U256P65535 = P65535<[u8; 32]>;
+/// 256-bit payload as 16 base-65536 (`2¹⁶`) digits (InsPIRe² regime, `p = 2¹⁶`).
+pub type U256P65536 = P65536<[u8; 32]>;
 
 pub trait Payload<B> {
-    const BASIS: u16;
+    /// Digit radix `p`. A `u32` because `2¹⁶ = 65536` does not fit a `u16`.
+    const BASIS: u32;
     const EXPONENT: usize;
     fn encode(digits: &mut [i16], a: B);
     fn decode(a: &mut B, digits: &[i16]);
@@ -15,7 +19,7 @@ pub struct P65535<B> {
 }
 
 impl Payload<[u8; 32]> for P65535<[u8; 32]> {
-    const BASIS: u16 = 65535;
+    const BASIS: u32 = 65535;
     const EXPONENT: usize = 17;
 
     fn encode(digits: &mut [i16], value: [u8; 32]) {
@@ -48,6 +52,33 @@ impl Payload<[u8; 32]> for P65535<[u8; 32]> {
 
         for (i, limb) in acc.iter().enumerate() {
             a[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct P65536<B> {
+    _phantom: PhantomData<B>,
+}
+
+impl Payload<[u8; 32]> for P65536<[u8; 32]> {
+    const BASIS: u32 = 65536;
+    const EXPONENT: usize = 16;
+
+    /// Base-`2¹⁶` digits are exactly the 16 little-endian 16-bit words of the
+    /// value. A digit `∈ [0, 2¹⁶)` stored centred mod `2¹⁶` is the same bit
+    /// pattern read as `i16` (so `32768 → -32768`, `65535 → -1`).
+    fn encode(digits: &mut [i16], value: [u8; 32]) {
+        debug_assert!(digits.len() == Self::EXPONENT);
+        for (i, d) in digits.iter_mut().enumerate() {
+            *d = u16::from_le_bytes([value[2 * i], value[2 * i + 1]]) as i16;
+        }
+    }
+
+    fn decode(a: &mut [u8; 32], digits: &[i16]) {
+        debug_assert!(digits.len() == Self::EXPONENT);
+        for (i, &stored) in digits.iter().enumerate() {
+            a[2 * i..2 * i + 2].copy_from_slice(&(stored as u16).to_le_bytes());
         }
     }
 }
@@ -122,6 +153,32 @@ mod u256_base65535_tests {
             let mut decoded = [0u8; 32];
             U256P65535::decode(&mut decoded, &digits);
             assert_eq!(decoded, v, "round-trip failed for n = {n}");
+        }
+    }
+
+    #[test]
+    fn p65536_roundtrips_and_digits_are_le_words() {
+        for n in [
+            0u64,
+            1,
+            65535,
+            65536,
+            65537,
+            0x1234_5678_9abc_def0,
+            u64::MAX,
+        ] {
+            let v = u256_le_from_u64(n);
+            let mut digits = [0i16; U256P65536::EXPONENT];
+            U256P65536::encode(&mut digits, v);
+            // digit 0 is the least-significant 16-bit word (centred i16).
+            assert_eq!(
+                digits[0],
+                (n as u16) as i16,
+                "low word mismatch for n = {n}"
+            );
+            let mut decoded = [0u8; 32];
+            U256P65536::decode(&mut decoded, &digits);
+            assert_eq!(decoded, v, "P65536 round-trip failed for n = {n}");
         }
     }
 

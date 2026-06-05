@@ -1,13 +1,12 @@
-use poulpy_core::GGSWEncryptSk;
+use std::marker::PhantomData;
+
 use poulpy_cpu_avx::FFT64Avx;
-use poulpy_hal::{api::ScratchOwnedAlloc, layouts::ScratchOwned};
 
 use crate::{
     client::{Client, Response},
-    database::{DatabaseInfos, DatabaseLayout},
-    interpolation::Interpolation,
-    parameters::Parameters,
-    payload::{Payload, U256P65535},
+    config::{Collapse, Config, INSPIRE_INT_32B},
+    database::DatabaseLayout,
+    payload::{U256P65535, U256P65536},
     server::Server,
 };
 
@@ -21,9 +20,9 @@ type Layout = DatabaseLayout<U256P65535>;
 // Full n=2048 FHE end-to-end: run the test suite with `--release`.
 #[test]
 fn server_client_roundtrip_full_u256() {
-    let params = Parameters::<BE>::default();
-    let n = params.n();
-    let layout = Layout::new(n, /* block_rows */ 2, /* block_cols */ 1);
+    let config = INSPIRE_INT_32B;
+    let n = config.n();
+    let layout = Layout::new(2 * n, n);
 
     // Index 300_000 lands in block-row (matrix) 1, exercising the second dim.
     let item: usize = 300_000;
@@ -32,40 +31,77 @@ fn server_client_roundtrip_full_u256() {
         *b = (i as u8).wrapping_mul(7).wrapping_add(3);
     }
 
-    let mut server = Server::<BE, U256P65535>::new(layout);
-    server.update(item, payload);
+    let mut server = Server::<BE, U256P65535>::new(config, layout);
+    server.update_shard(item, &[payload]);
     server.offline();
 
-    let address = server.layout().address(item);
-    assert_eq!(address.matrix, 1, "item should resolve to the second matrix");
-    let server_seed = server.server_seed();
-
-    // Client builds the query: common material + the interpolation GGSW root.
-    let mut client = Client::<BE>::default();
-    let (common, mut ctx, sk) = client.begin_query(&address, &server_seed);
-    let interpolation = Interpolation::new(server.layout(), client.params());
-    let mut qscratch = ScratchOwned::<BE>::alloc(
-        client
-            .params()
-            .module()
-            .ggsw_encrypt_sk_tmp_bytes(&client.params().ggsw_layout()),
+    let server_layout = server.layout();
+    let address = server_layout.address(item, n, n);
+    assert_eq!(
+        address.matrix, 1,
+        "item should resolve to the second matrix"
     );
-    let query = interpolation.build_query(
-        client.params().module(),
-        common,
-        &mut ctx,
-        &address,
-        &mut qscratch,
+
+    // Client builds the query from the same config/layout, without server state.
+    let mut client = Client::<BE, U256P65535>::new(config, layout);
+    let (query, state) = client.query(item);
+
+    let response: Response<BE> = server.respond(&query);
+    let got = client.decode(&response, &state);
+    assert_eq!(
+        got, payload,
+        "server/client round-trip mismatch for item {item}"
     );
-    drop(ctx);
+}
 
-    let (response, _timings): (Response<BE>, _) = server.respond(&query);
-    let recovered = client.decrypt(&response, &sk);
+#[test]
+fn server_client_roundtrip_recursion_generic_u256_chunked() {
+    let config = Config::<[u8; 32], U256P65536> {
+        n: 64,
+        base2k: 18,
+        k: 54,
+        collapse: Collapse::Recursion {
+            gamma0: 32,
+            gamma1: 32,
+            gamma2: 16,
+        },
+        _phantom: PhantomData,
+    };
+    let Collapse::Recursion { gamma0, .. } = config.collapse() else {
+        panic!("test config must use Recursion");
+    };
+    let layout = DatabaseLayout::<U256P65536>::new(70 * gamma0, 70);
+    let item = layout.num_payloads(gamma0) - 1;
 
-    let digits: Vec<i16> = (0..address.digits)
-        .map(|k| recovered[address.row_offset + k] as i16)
-        .collect();
-    let mut got = [0u8; 32];
-    U256P65535::decode(&mut got, &digits);
-    assert_eq!(got, payload, "server/client round-trip mismatch for item {item}");
+    let mut payload = [0u8; 32];
+    for (i, b) in payload.iter_mut().enumerate() {
+        *b = (i as u8).wrapping_mul(19).wrapping_add(11);
+    }
+
+    let mut server = Server::<BE, U256P65536>::new(config, layout);
+    server.update_shard(item, &[payload]);
+    server.offline();
+
+    let mut client = Client::<BE, U256P65536>::new(config, layout);
+    let (query, state) = client.query(item);
+    let address = state.address();
+    assert_eq!(address.column, 69);
+    assert_eq!(address.matrix, 69);
+    assert_eq!(address.row_offset, 16);
+
+    let response: Response<BE> = server.respond(&query);
+    let got = client.decode(&response, &state);
+    assert_eq!(
+        got, payload,
+        "generic Recursion round-trip mismatch for item {item}"
+    );
+
+    let expected_record = server.database().record(address.column, address.matrix);
+    let noise = client.noise(&response, &state, &expected_record);
+    assert!(
+        noise.max_log2() < -20.0,
+        "InsPIRe2 payload decoded correctly but noise estimate is too large: max={}, std={}",
+        noise.max_log2(),
+        noise.std_log2()
+    );
 }

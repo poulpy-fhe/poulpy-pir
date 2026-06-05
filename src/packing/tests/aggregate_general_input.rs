@@ -15,11 +15,11 @@
 //! where the aggregate and the COLLAPSE disagreed on the share direction.
 use crate::packing::PackingMaskAggregation;
 use poulpy_core::{
-    EncryptionLayout, GLWECompressedEncryptSk, LWEMatrixDecrypt, LWEMatrixMul,
+    EncryptionLayout, GLWECompressedEncryptSk, GLWEExpandLWEMatrix, LWEMatrixDecrypt,
     layouts::{
-        Base2K, CoeffMatrixInfos, Degree, GLWELayout, GLWESecretPreparedFactory, LWEInfos,
-        LWEMatrixLayout, ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank, SecretConversion,
-        TorusPrecision,
+        Base2K, CoeffMatrixInfos, Degree, GLWEDecompress, GLWELayout, GLWESecretPreparedFactory,
+        LWEInfos, LWEMatrixLayout, ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank,
+        SecretConversion, TorusPrecision,
     },
 };
 use poulpy_cpu_avx::FFT64Avx;
@@ -30,7 +30,7 @@ use poulpy_hal::{
         VecZnxBigNormalize, VecZnxDftAddAssign, VecZnxDftAlloc, VecZnxIdftApplyTmpA,
     },
     layouts::{
-        Backend, GaloisElement, Module, ScalarZnxToBackendMut, ScalarZnxToBackendRef, ScratchOwned,
+        GaloisElement, Module, ScalarZnxToBackendMut, ScalarZnxToBackendRef, ScratchOwned,
         SvpPPolToBackendMut, SvpPPolToBackendRef, VecZnxBigToBackendMut, VecZnxBigToBackendRef,
         VecZnxDftToBackendMut, VecZnxDftToBackendRef, VecZnxToBackendMut, VecZnxToBackendRef,
         ZnxViewMut,
@@ -86,7 +86,7 @@ fn run() {
         base2k: src_infos.base2k(),
         k: src_infos.max_k(),
     };
-    let u_infos = CoeffLayout {
+    let _u_infos = CoeffLayout {
         n: Degree(n as u32),
         rows_out: n,
         base2k,
@@ -97,8 +97,6 @@ fn run() {
         module
             .glwe_compressed_encrypt_sk_tmp_bytes(&src_infos)
             .max(module.lwe_matrix_decrypt_tmp_bytes(&matrix_infos))
-            .max(module.lwe_matrix_mul_mask_tmp_bytes(&matrix_infos, &u_infos, &src_infos))
-            .max(module.lwe_matrix_mul_body_tmp_bytes(&matrix_infos, &u_infos, &src_infos))
             .max(module.packing_mask_preprocessing_tmp_bytes(matrix_infos.size()))
             .max(1 << 20),
     );
@@ -133,9 +131,15 @@ fn run() {
         u.data_mut().at_mut(i, 0)[(i + 1) % n] = 1;
     }
 
+    // Expand the compressed query to an LWE matrix, then apply U via the test
+    // oracle (the homomorphic `U · query` product, removed from the library).
+    let mut query_glwe = module.glwe_alloc_from_infos(&src_infos);
+    module.decompress_glwe(&mut query_glwe, &query);
+    let mut query_expanded = module.lwe_matrix_alloc_from_infos(&matrix_infos);
+    module.glwe_expand_lwe_matrix(&mut query_expanded, &query_glwe, &mut scratch.borrow());
     let mut product = module.lwe_matrix_alloc_from_infos(&matrix_infos);
-    module.lwe_matrix_mul_mask(&mut product, &u, &query, &mut scratch.borrow());
-    module.lwe_matrix_mul_body(&mut product, &u, &query, &mut scratch.borrow());
+    crate::test_oracle::lwe_matrix_mul_mask(&mut product, &u, &query_expanded);
+    crate::test_oracle::lwe_matrix_mul_body(&mut product, &u, &query_expanded);
 
     // Reference: decrypt the LWE matrix directly under the raw LWE secret.
     let mut ref_pt = module.glwe_plaintext_alloc_from_infos(&src_infos);
@@ -265,17 +269,17 @@ fn run() {
     );
 
     // The aggregate is a CORRECT MLWE for general input: it decrypts to U*data
-    // under the inverse secret share ŝ[col] = τ_{g^{-col}}(s̄), which is the
-    // share direction the COLLAPSE / online path consumes (and the convention
-    // the whole pipeline now agrees on). The positive share only matches for
+    // under the positive secret share ŝ[col] = τ_{g^{+col}}(s̄), matching the
+    // paper's Algorithm 1 TRANSFORM convention (â[j] = τ_g^{+j}(ã)) that the
+    // whole pipeline now agrees on. The inverse share only matches for
     // symmetric expansion masks.
     assert_eq!(
-        decoded_inv, reference,
-        "aggregate of U * expand(query) must decrypt to U * data under the inverse share τ_{{g^{{-col}}}}"
+        decoded_pos, reference,
+        "aggregate of U * expand(query) must decrypt to U * data under the positive share τ_{{g^{{+col}}}}"
     );
     assert_ne!(
-        decoded_pos, reference,
-        "the positive share τ_{{g^{{+col}}}} only matches for symmetric (expansion) masks"
+        decoded_inv, reference,
+        "the inverse share τ_{{g^{{-col}}}} only matches for symmetric (expansion) masks"
     );
 }
 

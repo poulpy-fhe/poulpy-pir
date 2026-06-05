@@ -1,5 +1,5 @@
 use crate::{
-    database::{DatabaseInfos, DatabaseLayout},
+    database::DatabaseLayout,
     payload::{Payload, U256P65535},
 };
 use poulpy_cpu_ref::FFT64Ref;
@@ -20,11 +20,11 @@ fn database_encode_shard_roundtrips_via_matrix_inspection() {
     let block_rows: usize = 3;
 
     let module = Module::<BE>::new(n as u64);
-    let layout = L::new(n, block_rows, block_cols);
-    let mut db = layout.instantiate(&module, base2k);
+    let layout = L::new(block_rows * n, block_cols * n);
+    let mut db = layout.instantiate(&module, base2k, n);
 
     let capacity = db.payload_capacity();
-    assert_eq!(capacity, layout.num_payloads());
+    assert_eq!(capacity, layout.num_payloads(n));
     assert_eq!(
         capacity,
         block_rows * (n / U256P65535::EXPONENT) * (block_cols * n)
@@ -52,6 +52,12 @@ fn database_encode_shard_roundtrips_via_matrix_inspection() {
     let cols = block_cols * n;
 
     for (e, expected) in payloads.iter().enumerate() {
+        assert_eq!(
+            db.payload(e),
+            *expected,
+            "payload {e} did not round-trip through Database::payload"
+        );
+
         let m = e / payloads_per_matrix;
         let e_local = e % payloads_per_matrix;
         let c = e_local % cols;
@@ -84,8 +90,8 @@ fn database_encode_shard_roundtrips_via_matrix_inspection() {
 fn database_encode_shard_rejects_overflow() {
     let n: usize = 32;
     let module = Module::<BE>::new(n as u64);
-    let layout = L::new(n, /* block_rows */ 1, /* block_cols */ 1);
-    let mut db = layout.instantiate(&module, /* base2k */ 16);
+    let layout = L::new(n, n);
+    let mut db = layout.instantiate(&module, /* base2k */ 16, n);
 
     let capacity = db.payload_capacity();
     let too_many = vec![[0u8; 32]; capacity + 1];

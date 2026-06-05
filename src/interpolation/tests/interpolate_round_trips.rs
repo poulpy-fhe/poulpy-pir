@@ -13,6 +13,7 @@ use poulpy_hal::{
 
 use crate::interpolation::MonomialInterpolation;
 
+#[allow(clippy::needless_range_loop)]
 fn run<BE>()
 where
     BE: Backend,

@@ -15,8 +15,8 @@ use poulpy_core::{
     GGSWEncryptSk,
     layouts::{
         Base2K, CoeffMatrix, GGSW, GGSWInfos, GGSWPrepared, GGSWPreparedFactory,
-        GGSWPreparedToBackendRef, GLWE, GLWEInfos, GLWEToBackendMut, GLWEToBackendRef,
-        ModuleCoreAlloc, TorusPrecision,
+        GGSWPreparedToBackendRef, GLWE, GLWEAutomorphismKeyCompressed, GLWEInfos, GLWEToBackendMut,
+        GLWEToBackendRef, ModuleCoreAlloc, TorusPrecision,
     },
 };
 use poulpy_hal::{
@@ -29,18 +29,59 @@ use poulpy_hal::{
 
 use crate::{
     client::{QueryCommon, QueryContext},
-    database::{Database, DatabaseInfos, DatabaseLayout, PayloadAddress},
+    database::{Database, DatabaseLayout, PayloadAddress},
     encoding::ModPEncoder,
     interpolation::{HornerCoeffs, HornerEvaluation, MonomialInterpolation},
     parameters::Parameters,
     payload::Payload,
 };
 
-/// The interpolation reduction's query: the common first-dim material plus the
-/// GGSW root `Enc(X^i)` selecting the target matrix.
+/// Full-packing keys used by the interpolation collapse.
+pub struct InterpolationKeys<BE: Backend> {
+    key_g: GLWEAutomorphismKeyCompressed<BE::OwnedBuf>,
+    key_h: GLWEAutomorphismKeyCompressed<BE::OwnedBuf>,
+}
+
+impl<BE: Backend> InterpolationKeys<BE> {
+    pub(crate) fn new(
+        key_g: GLWEAutomorphismKeyCompressed<BE::OwnedBuf>,
+        key_h: GLWEAutomorphismKeyCompressed<BE::OwnedBuf>,
+    ) -> Self {
+        Self { key_g, key_h }
+    }
+
+    pub(crate) fn key_g(&self) -> &GLWEAutomorphismKeyCompressed<BE::OwnedBuf> {
+        &self.key_g
+    }
+
+    pub(crate) fn key_h(&self) -> &GLWEAutomorphismKeyCompressed<BE::OwnedBuf> {
+        &self.key_h
+    }
+}
+
+/// The interpolation reduction's query: the common first-dim material, the
+/// full-packing keys (interpolation uses full pack), and the GGSW root `Enc(X^i)`
+/// selecting the target matrix.
 pub struct InterpolationQuery<BE: Backend> {
     pub common: QueryCommon<BE>,
+    pub(crate) keys: InterpolationKeys<BE>,
     pub root: GGSW<BE::OwnedBuf>,
+}
+
+/// The interpolation server response: one packed GLWE holding the selected
+/// column.
+pub struct InterpolationResponse<BE: Backend> {
+    selected: GLWE<BE::OwnedBuf>,
+}
+
+impl<BE: Backend> InterpolationResponse<BE> {
+    pub(crate) fn new(selected: GLWE<BE::OwnedBuf>) -> Self {
+        Self { selected }
+    }
+
+    pub fn selected(&self) -> &GLWE<BE::OwnedBuf> {
+        &self.selected
+    }
 }
 
 /// A database interpolated **in place**: panels `0..nb_matrices` live in `db`'s
@@ -83,13 +124,14 @@ impl Interpolation {
     /// the GGSW layout is taken).
     pub fn new<BE: Backend, P: Payload<[u8; 32]>>(
         layout: &DatabaseLayout<P>,
-        params: &Parameters<BE>,
+        params: &Parameters<BE, [u8; 32], P>,
     ) -> Self {
+        let n = params.n();
         Self {
-            interpolation_t: layout.interpolation_t(),
-            nb_matrices: layout.block_rows(),
-            k_blocks: layout.block_cols(),
-            n: layout.n(),
+            interpolation_t: layout.interpolation_t(n),
+            nb_matrices: layout.block_rows(n),
+            k_blocks: layout.block_cols(n),
+            n,
             ggsw_layout: params.ggsw_layout(),
         }
     }
@@ -209,9 +251,14 @@ impl Interpolation {
         let nb = self.nb_matrices;
         let t = self.interpolation_t;
         let inv_t = encoder.inv(t as i64);
-        assert_eq!(matrix.matrices().len(), t * kb, "matrix DB must hold interpolation_t block-rows");
+        assert_eq!(
+            matrix.matrices().len(),
+            t * kb,
+            "matrix DB must hold interpolation_t block-rows"
+        );
 
-        let mut working: Vec<VecZnx<Vec<u8>>> = (0..t).map(|_| module.vec_znx_alloc(n, 1)).collect();
+        let mut working: Vec<VecZnx<Vec<u8>>> =
+            (0..t).map(|_| module.vec_znx_alloc(n, 1)).collect();
         for bc in 0..kb {
             for (m, w) in working.iter_mut().enumerate() {
                 if m < nb {
@@ -257,7 +304,7 @@ impl Interpolation {
         for<'b> BE::BufRef<'b>: HostDataRef,
         for<'b> BE::BufMut<'b>: HostDataMut,
     {
-        let exponent = interpolation_root_exponent(module.n(), addr.matrix, addr.interpolation_t);
+        let exponent = interpolation_root_exponent(module.n(), addr.matrix, self.interpolation_t);
         let root_pt = root_monomial(module, exponent);
         let mut root = module.ggsw_alloc_from_infos(&self.ggsw_layout);
         module.ggsw_encrypt_sk(
@@ -269,7 +316,9 @@ impl Interpolation {
             &mut ctx.source_xa,
             &mut scratch.borrow(),
         );
-        InterpolationQuery { common, root }
+        // Take the full-packing keys the client generated and forwarded.
+        let keys = ctx.take_interpolation_keys();
+        InterpolationQuery { common, keys, root }
     }
 
     /// Prepare the received GGSW root for the Horner evaluation.

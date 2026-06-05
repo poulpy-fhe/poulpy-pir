@@ -43,6 +43,7 @@ where
     acc
 }
 
+#[allow(clippy::needless_range_loop)]
 fn run<BE>()
 where
     BE: Backend,

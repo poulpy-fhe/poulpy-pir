@@ -50,12 +50,9 @@ pub(crate) fn pack_default<BE, B, R>(
     R: GLWEToBackendMut<BE> + GLWEInfos,
     B: VecZnxToBackendRef<BE> + ZnxInfos,
     <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static,
-    for<'a> ScratchArena<'a, BE>: ScratchArenaTakeBasic<'a, BE>,
 {
-    let kg_steps = precomputations.bsgs_kg_steps();
     let baby_size = precomputations.bsgs_baby_size();
     assert!(chunk_size >= 1, "chunk_size must be >= 1");
-    let key_h_body = key_precomputations.key_h();
     let acc_size = key_precomputations.key_size();
     let total_baby_buffers = chunk_size * baby_size;
 
@@ -154,24 +151,29 @@ pub(crate) fn pack_default<BE, B, R>(
         let _ = chunk_len; // silence unused if no debug build
     }
 
-    // The final `key_h` body product is outside the `key_g` BSGS groups. It
-    // uses the final DFT mask column stored at `kg_steps`.
-    {
-        let mask_dft_final = precomputations.bsgs_col(kg_steps).to_backend_ref();
-        module.vmp_apply_dft_to_dft(
-            &mut product_h_dft.to_backend_mut(),
-            &mask_dft_final,
-            &key_h_body.vmp_pmat_backend_ref(),
+    // The final `key_h` body product is outside the `key_g` BSGS groups and uses
+    // the final DFT mask column stored at `kg_steps`. Partial packing (Algorithm
+    // 2) has no `key_h` step, so this is skipped entirely.
+    if !precomputations.partial() {
+        let kg_steps = precomputations.bsgs_kg_steps();
+        let key_h_body = key_precomputations.key_h();
+        {
+            let mask_dft_final = precomputations.bsgs_col(kg_steps).to_backend_ref();
+            module.vmp_apply_dft_to_dft(
+                &mut product_h_dft.to_backend_mut(),
+                &mask_dft_final,
+                &key_h_body.vmp_pmat_backend_ref(),
+                0,
+                &mut scratch_local.borrow(),
+            );
+        }
+        module.vec_znx_dft_add_assign(
+            &mut body_acc_dft.to_backend_mut(),
             0,
-            &mut scratch_local.borrow(),
+            &product_h_dft.to_backend_ref(),
+            0,
         );
     }
-    module.vec_znx_dft_add_assign(
-        &mut body_acc_dft.to_backend_mut(),
-        0,
-        &product_h_dft.to_backend_ref(),
-        0,
-    );
 
     module.vec_znx_idft_apply(
         &mut body_big.to_backend_mut(),
