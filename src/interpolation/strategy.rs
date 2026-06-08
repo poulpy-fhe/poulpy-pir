@@ -72,15 +72,24 @@ pub struct InterpolationQuery<BE: Backend> {
 /// column.
 pub struct InterpolationResponse<BE: Backend> {
     selected: GLWE<BE::OwnedBuf>,
+    /// DEBUG: the per-panel packed GLWEs produced right before the Horner
+    /// `reduce`. Kept so the client can decrypt them and localise where the
+    /// noise blows up in the interpolation pipeline.
+    packed: Vec<GLWE<BE::OwnedBuf>>,
 }
 
 impl<BE: Backend> InterpolationResponse<BE> {
-    pub(crate) fn new(selected: GLWE<BE::OwnedBuf>) -> Self {
-        Self { selected }
+    pub(crate) fn new(selected: GLWE<BE::OwnedBuf>, packed: Vec<GLWE<BE::OwnedBuf>>) -> Self {
+        Self { selected, packed }
     }
 
     pub fn selected(&self) -> &GLWE<BE::OwnedBuf> {
         &self.selected
+    }
+
+    /// DEBUG: per-panel packed GLWEs (pre-reduce).
+    pub fn packed(&self) -> &[GLWE<BE::OwnedBuf>] {
+        &self.packed
     }
 }
 

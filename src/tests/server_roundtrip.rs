@@ -19,6 +19,44 @@ type Layout = DatabaseLayout<U256P65535>;
 /// second matrix and checks it decodes exactly.
 // Full n=2048 FHE end-to-end: run the test suite with `--release`.
 #[test]
+fn server_client_roundtrip_interpolation_generic_u256_chunked() {
+    let config = Config::<[u8; 32], U256P65535> {
+        n: 2048,
+        base2k: 18,
+        k: 54,
+        collapse: Collapse::Interpolation,
+        _phantom: PhantomData,
+    };
+    let n = config.n();
+    let layout = Layout::new(8 * n, n);
+    let item = 1_800_000usize;
+
+    let mut server = Server::<BE, U256P65535>::new(config, layout);
+    let capacity = layout.num_payloads(n);
+    let mut payloads = vec![[0u8; 32]; capacity];
+    for (idx, payload) in payloads.iter_mut().enumerate() {
+        for (byte_idx, b) in payload.iter_mut().enumerate() {
+            *b = (idx as u8)
+                .wrapping_mul(29)
+                .wrapping_add((byte_idx as u8).wrapping_mul(13))
+                .wrapping_add(5);
+        }
+    }
+    let payload = payloads[item];
+    server.update_shard(0, &payloads);
+    server.offline();
+
+    let mut client = Client::<BE, U256P65535>::new(config, layout);
+    let (query, state) = client.query(item);
+    let response: Response<BE> = server.respond(&query);
+    let got = client.decode(&response, &state);
+    assert_eq!(
+        got, payload,
+        "generic interpolation round-trip mismatch for item {item}"
+    );
+}
+
+#[test]
 fn server_client_roundtrip_full_u256() {
     let config = INSPIRE_INT_32B;
     let n = config.n();

@@ -1,8 +1,7 @@
 use poulpy_core::{
-    EncryptionLayout, GGSWEncryptSk, GLWECompressedEncryptSk, GLWEDecrypt, GLWENoise,
+    EncryptionLayout, GGSWEncryptSk, GLWECompressedEncryptSk, GLWEDecrypt, GLWENoise, LWEMatrixDecrypt,
     layouts::{
-        BackendGLWESecretPrepared, Degree, GLWESecret, GLWESecretPreparedFactory, LWESecret,
-        ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank, SecretConversion, TorusPrecision,
+        Base2K, BackendGLWESecretPrepared, Degree, GLWELayout, GLWEPlaintext, GLWESecret, GLWESecretPreparedFactory, LWEMatrix, LWESecret, ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank, SecretConversion, TorusPrecision
     },
 };
 use poulpy_hal::{
@@ -312,6 +311,9 @@ where
                     &sk_pack_prep,
                     &mut scratch.borrow(),
                 );
+                let pt = &mut module.glwe_plaintext_alloc_from_infos(response.selected());
+                module.glwe_decrypt(response.selected(), pt, &sk_pack_prep, &mut scratch.borrow(),);
+                println!("pt: {pt}");
                 ResponseNoise::new(stats.max(), stats.std())
             }
             Response::Recursion(response) => {
@@ -355,6 +357,178 @@ where
                 ResponseNoise::new(stats.max(), stats.std())
             }
         }
+    }
+
+    /// DEBUG: per-panel **self-noise** of the packed GLWEs produced just before
+    /// the Horner `reduce` in the interpolation pipeline. Each panel is decrypted,
+    /// rounded to the nearest mod-`p` plaintext, and scored against that rounding,
+    /// so the returned `(max_log2, std_log2)` measures the encryption noise of the
+    /// packed ciphertext itself. Healthy values are around `-20`; values near `-1`
+    /// mean the panel is already garbage before `reduce`.
+    pub fn debug_packed_noise(
+        &self,
+        response: &Response<BE>,
+        state: &QueryState<BE>,
+    ) -> Vec<(f64, f64)>
+    where
+        BE: HostBackend,
+        Module<BE>: GLWENoise<BE>,
+    {
+        let params = &self.params;
+        let module = params.module();
+        let sk_pack_prep = self.prepare_pack_secret(state.sk());
+        let Response::Interpolation(response) = response else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::with_capacity(response.packed().len() + 1);
+        // Panels first, then the final `selected` (last entry) for comparison.
+        for ct in response.packed().iter().chain(std::iter::once(response.selected())) {
+            out.push(self.glwe_self_noise(ct, &sk_pack_prep));
+        }
+        out
+    }
+
+    /// Self-noise of a GLWE under `sk_pack_prep`: decrypt, round to the nearest
+    /// mod-`p` plaintext, and score the ciphertext against that rounding. Returns
+    /// `(max_log2, std_log2)`.
+    fn glwe_self_noise(
+        &self,
+        ct: &poulpy_core::layouts::GLWE<BE::OwnedBuf>,
+        sk_pack_prep: &BackendGLWESecretPrepared<BE>,
+    ) -> (f64, f64)
+    where
+        BE: HostBackend,
+        Module<BE>: GLWENoise<BE>,
+    {
+        let params = &self.params;
+        let module = params.module();
+        let mut scratch = ScratchOwned::<BE>::alloc(
+            module
+                .glwe_decrypt_tmp_bytes(ct)
+                .max(module.glwe_noise_tmp_bytes(ct)),
+        );
+        let mut pt = module.glwe_plaintext_alloc_from_infos(&params.glwe_pack());
+        module.glwe_decrypt(ct, &mut pt, sk_pack_prep, &mut scratch.borrow());
+        let mut ints = vec![0i64; params.n()];
+        params
+            .encoder()
+            .decode_vec_i64(&pt.data, params.base2k(), 0, &mut ints);
+        let mut expected = module.glwe_plaintext_alloc_from_infos(&params.glwe_pack());
+        params
+            .encoder()
+            .encode_vec_i64(&mut expected.data, params.base2k(), 0, &ints);
+        let stats = module.glwe_noise(ct, &expected, sk_pack_prep, &mut scratch.borrow());
+        (stats.max().log2(), stats.std().log2())
+    }
+
+    /// DEBUG: decrypt the per-panel first-step `(U·A, U·b)` results (from
+    /// `Server::debug_interpolation_first_step`) under the query LWE secret and
+    /// compare each, value-by-value, to the plaintext interpolated-`U` column it
+    /// should equal. Returns `(max_abs_error_mod_p, num_mismatches)` per panel: a
+    /// correct first step gives `(0, 0)`.
+    pub fn debug_decrypt_first_step(
+        &self,
+        first_steps: &[(LWEMatrix<Vec<u8>>, Vec<i64>)],
+        state: &QueryState<BE>,
+    ) -> Vec<(i64, usize)>
+    where
+        Module<BE>: LWEMatrixDecrypt<BE>,
+    {
+        let params = &self.params;
+        let module = params.module();
+        let sk = state.sk().sk_lwe();
+        let p = params.p();
+        let n = params.n();
+        let lwe_infos = params.lwe_matrix_infos();
+        let pt_layout = EncryptionLayout::new_from_default_sigma(GLWELayout {
+            n: Degree(n as u32),
+            base2k: Base2K(params.base2k() as u32),
+            k: lwe_infos.k,
+            rank: Rank(1),
+        })
+        .unwrap();
+
+        let center = |x: i64| -> i64 {
+            let mut r = x.rem_euclid(p);
+            if r > p / 2 {
+                r -= p;
+            }
+            r
+        };
+
+        let mut out = Vec::with_capacity(first_steps.len());
+        for (res, expected) in first_steps {
+            let mut pt = module.glwe_plaintext_alloc_from_infos(&pt_layout);
+            let mut scratch = ScratchOwned::<BE>::alloc(module.lwe_matrix_decrypt_tmp_bytes(&lwe_infos));
+            module.lwe_matrix_decrypt(res, &mut pt, sk, &mut scratch.borrow());
+
+            let mut recovered = vec![0i64; n];
+            params
+                .encoder()
+                .decode_vec_i64(&pt.data, params.base2k(), 0, &mut recovered);
+
+            let mut max_err = 0i64;
+            let mut mismatches = 0usize;
+            for (&r, &e) in recovered.iter().zip(expected) {
+                let d = center(r - e);
+                if d != 0 {
+                    mismatches += 1;
+                }
+                max_err = max_err.max(d.abs());
+            }
+            out.push((max_err, mismatches));
+        }
+        out
+    }
+
+    /// DEBUG: decrypt each packed panel under `sk_pack` and compare its decoded
+    /// values to the expected interpolated-`U` column (same reference used by
+    /// [`Self::debug_decrypt_first_step`]). Splits a value bug between pack (wrong
+    /// here) and `reduce` (correct here). Returns `(max_abs_error_mod_p, mismatches)`.
+    pub fn debug_decrypt_packed_values(
+        &self,
+        response: &Response<BE>,
+        expected: &[Vec<i64>],
+        state: &QueryState<BE>,
+    ) -> Vec<(i64, usize)> {
+        let params = &self.params;
+        let module = params.module();
+        let sk_pack_prep = self.prepare_pack_secret(state.sk());
+        let Response::Interpolation(response) = response else {
+            return Vec::new();
+        };
+        let p = params.p();
+        let center = |x: i64| -> i64 {
+            let mut r = x.rem_euclid(p);
+            if r > p / 2 {
+                r -= p;
+            }
+            r
+        };
+
+        let mut out = Vec::new();
+        for (packed, exp) in response.packed().iter().zip(expected) {
+            let mut pt = module.glwe_plaintext_alloc_from_infos(&params.glwe_pack());
+            let mut scratch = ScratchOwned::<BE>::alloc(module.glwe_decrypt_tmp_bytes(packed));
+            module.glwe_decrypt(packed, &mut pt, &sk_pack_prep, &mut scratch.borrow());
+            let mut recovered = vec![0i64; params.n()];
+            params
+                .encoder()
+                .decode_vec_i64(&pt.data, params.base2k(), 0, &mut recovered);
+
+            let mut max_err = 0i64;
+            let mut mismatches = 0usize;
+            for (&r, &e) in recovered.iter().zip(exp) {
+                let d = center(r - e);
+                if d != 0 {
+                    mismatches += 1;
+                }
+                max_err = max_err.max(d.abs());
+            }
+            out.push((max_err, mismatches));
+        }
+        out
     }
 
     pub fn decode(&mut self, response: &Response<BE>, state: &QueryState<BE>) -> [u8; 32] {
