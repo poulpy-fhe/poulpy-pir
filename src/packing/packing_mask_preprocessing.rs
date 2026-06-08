@@ -6,9 +6,9 @@
 
 use poulpy_hal::{
     api::{
-        ScratchArenaTakeBasic, VecZnxAddAssignBackend, VecZnxAutomorphismBackend,
-        VecZnxCopyBackend, VecZnxNormalize, VecZnxNormalizeTmpBytes, VecZnxRotateAssignBackend,
-        VecZnxRotateAssignTmpBytes, VecZnxRshAssignBackend, VecZnxRshTmpBytes,
+        ScratchArenaTakeBasic, VecZnxAddAssignBackend, VecZnxAutomorphismRotateBackend,
+        VecZnxCopyBackend, VecZnxNormalize, VecZnxNormalizeTmpBytes,
+        VecZnxRshAssignBackend, VecZnxRshTmpBytes,
         VecZnxTransposeBackend, VecZnxZeroBackend,
     },
     layouts::{
@@ -26,7 +26,7 @@ pub(crate) fn packing_mask_preprocessing_tmp_bytes_default<BE>(
 ) -> usize
 where
     BE: Backend,
-    Module<BE>: VecZnxNormalizeTmpBytes + VecZnxRotateAssignTmpBytes + VecZnxRshTmpBytes,
+    Module<BE>: VecZnxNormalizeTmpBytes + VecZnxRshTmpBytes,
 {
     const ALIGN: usize = 64;
     let round = |x: usize| x.next_multiple_of(ALIGN);
@@ -37,8 +37,7 @@ where
     let internal = round(
         module
             .vec_znx_normalize_tmp_bytes()
-            .max(module.vec_znx_rsh_tmp_bytes())
-            .max(module.vec_znx_rotate_assign_tmp_bytes()),
+            .max(module.vec_znx_rsh_tmp_bytes()),
     );
     temp_input + temp_output + work + internal
 }
@@ -55,7 +54,7 @@ fn mask_preprocessing_arithmetic_size(size: usize, base2k: usize) -> usize {
 fn packing_mask_preprocessing_work_tmp_bytes<BE>(module: &Module<BE>, size: usize) -> usize
 where
     BE: Backend,
-    Module<BE>: VecZnxRotateAssignTmpBytes + VecZnxRshTmpBytes,
+    Module<BE>: VecZnxRshTmpBytes,
 {
     const ALIGN: usize = 64;
     let round = |x: usize| x.next_multiple_of(ALIGN);
@@ -64,11 +63,7 @@ where
     let transposed = round(VecZnx::<Vec<u8>>::bytes_of(n, n, size));
     let one_col = round(VecZnx::<Vec<u8>>::bytes_of(n, 1, size));
     let tree = round(VecZnx::<Vec<u8>>::bytes_of(n, log_n, size));
-    let internal = round(
-        module
-            .vec_znx_rsh_tmp_bytes()
-            .max(module.vec_znx_rotate_assign_tmp_bytes()),
-    );
+    let internal = round(module.vec_znx_rsh_tmp_bytes());
     transposed + 2 * one_col + 2 * tree + internal
 }
 
@@ -155,10 +150,9 @@ pub(crate) fn packing_mask_preprocessing_default<BE, R, A>(
     BE: Backend,
     Module<BE>: VecZnxCopyBackend<BE>
         + VecZnxTransposeBackend<BE>
-        + VecZnxAutomorphismBackend<BE>
+        + VecZnxAutomorphismRotateBackend<BE>
         + VecZnxAddAssignBackend<BE>
         + VecZnxNormalize<BE>
-        + VecZnxRotateAssignBackend<BE>
         + VecZnxRshAssignBackend<BE>
         + GaloisElement,
     R: VecZnxToBackendMut<BE> + ZnxInfos,
@@ -232,9 +226,8 @@ fn packing_mask_preprocessing_work<BE, R, A>(
     BE: Backend,
     Module<BE>: VecZnxCopyBackend<BE>
         + VecZnxTransposeBackend<BE>
-        + VecZnxAutomorphismBackend<BE>
+        + VecZnxAutomorphismRotateBackend<BE>
         + VecZnxAddAssignBackend<BE>
-        + VecZnxRotateAssignBackend<BE>
         + VecZnxRshAssignBackend<BE>
         + GaloisElement,
     R: VecZnxToBackendMut<BE> + ZnxInfos,
@@ -296,26 +289,12 @@ fn packing_mask_preprocessing_work<BE, R, A>(
         occupied_b.iter_mut().for_each(|x| *x = false);
 
         for k in 0..n {
-            module.vec_znx_automorphism_backend(h, &mut shared_mut, 0, &t_ref, k);
-            {
-                let shared_ref = VecZnxReborrowBackendRef::<BE>::reborrow_backend_ref(&shared_mut);
-                module.vec_znx_automorphism_backend(-1, &mut stage_a_mut, 0, &shared_ref, 0);
-            }
-
-            if k != 0 {
-                module.vec_znx_rotate_assign_backend(
-                    k as i64,
-                    &mut shared_mut,
-                    0,
-                    &mut arena.borrow(),
-                );
-                module.vec_znx_rotate_assign_backend(
-                    k as i64,
-                    &mut stage_a_mut,
-                    0,
-                    &mut arena.borrow(),
-                );
-            }
+            // shared = X^k · τ_h(ã[k]) and stage_a = X^k · τ_{-h}(ã[k]), each fused
+            // into a single signed-permutation pass straight from `t_ref`. The old
+            // `τ_{-1}(shared)` collapses into the `-h` automorphism since
+            // τ_{-1} ∘ τ_h = τ_{-h}.
+            module.vec_znx_automorphism_rotate_backend(h, k as i64, &mut shared_mut, 0, &t_ref, k);
+            module.vec_znx_automorphism_rotate_backend(-h, k as i64, &mut stage_a_mut, 0, &t_ref, k);
 
             binary_tree_step(
                 module,
@@ -350,7 +329,7 @@ pub(crate) fn packing_mask_preprocessing_partial_tmp_bytes_default<BE>(
 ) -> usize
 where
     BE: Backend,
-    Module<BE>: VecZnxNormalizeTmpBytes + VecZnxRotateAssignTmpBytes + VecZnxRshTmpBytes,
+    Module<BE>: VecZnxNormalizeTmpBytes + VecZnxRshTmpBytes,
 {
     const ALIGN: usize = 64;
     let round = |x: usize| x.next_multiple_of(ALIGN);
@@ -366,8 +345,7 @@ where
     let internal = round(
         module
             .vec_znx_normalize_tmp_bytes()
-            .max(module.vec_znx_rsh_tmp_bytes())
-            .max(module.vec_znx_rotate_assign_tmp_bytes()),
+            .max(module.vec_znx_rsh_tmp_bytes()),
     );
     temp_input + temp_output + transposed + 2 * one_col + tree + internal
 }
@@ -393,10 +371,9 @@ pub(crate) fn packing_mask_preprocessing_partial_default<BE, R, A>(
     BE: Backend,
     Module<BE>: VecZnxCopyBackend<BE>
         + VecZnxTransposeBackend<BE>
-        + VecZnxAutomorphismBackend<BE>
+        + VecZnxAutomorphismRotateBackend<BE>
         + VecZnxAddAssignBackend<BE>
         + VecZnxNormalize<BE>
-        + VecZnxRotateAssignBackend<BE>
         + VecZnxRshAssignBackend<BE>
         + VecZnxZeroBackend<BE>
         + GaloisElement,
@@ -472,9 +449,8 @@ fn packing_mask_preprocessing_partial_work<BE, R, A>(
     BE: Backend,
     Module<BE>: VecZnxCopyBackend<BE>
         + VecZnxTransposeBackend<BE>
-        + VecZnxAutomorphismBackend<BE>
+        + VecZnxAutomorphismRotateBackend<BE>
         + VecZnxAddAssignBackend<BE>
-        + VecZnxRotateAssignBackend<BE>
         + VecZnxRshAssignBackend<BE>
         + VecZnxZeroBackend<BE>
         + GaloisElement,
@@ -532,15 +508,8 @@ fn packing_mask_preprocessing_partial_work<BE, R, A>(
 
     for (j, &h) in h_list.iter().enumerate() {
         for k in 0..gamma {
-            module.vec_znx_automorphism_backend(-h, &mut term_mut, 0, &t_ref, k);
-            if k != 0 {
-                module.vec_znx_rotate_assign_backend(
-                    k as i64,
-                    &mut term_mut,
-                    0,
-                    &mut arena.borrow(),
-                );
-            }
+            // term = X^k · τ_{-h}(ã[k]) fused into one pass straight from `t_ref`.
+            module.vec_znx_automorphism_rotate_backend(-h, k as i64, &mut term_mut, 0, &t_ref, k);
             let term_ref = VecZnxReborrowBackendRef::<BE>::reborrow_backend_ref(&term_mut);
             module.vec_znx_add_assign_backend(&mut dst_mut, j, &term_ref, 0);
         }

@@ -13,11 +13,11 @@ use poulpy_core::{
 };
 use poulpy_hal::{
     api::{
-        VecZnxAddAssignBackend, VecZnxAlloc, VecZnxAutomorphismBackend, VecZnxBigBytesOf,
-        VecZnxBigNormalize, VecZnxBigNormalizeTmpBytes, VecZnxCopyBackend, VecZnxDftAddAssign,
+        VecZnxAddAssignBackend, VecZnxAlloc, VecZnxAutomorphismBackend, VecZnxAutomorphismRotateBackend,
+        VecZnxBigBytesOf, VecZnxBigNormalize, VecZnxBigNormalizeTmpBytes, VecZnxCopyBackend, VecZnxDftAddAssign,
         VecZnxDftAlloc, VecZnxDftApply, VecZnxDftAutomorphism, VecZnxDftAutomorphismPlan,
         VecZnxDftBytesOf, VecZnxDftZero, VecZnxIdftApply, VecZnxIdftApplyTmpBytes, VecZnxNormalize,
-        VecZnxNormalizeTmpBytes, VecZnxRotateAssignBackend, VecZnxRotateAssignTmpBytes,
+        VecZnxNormalizeTmpBytes,
         VecZnxRshAssignBackend, VecZnxRshTmpBytes, VecZnxTransposeBackend, VecZnxZeroBackend,
         VmpApplyDftToDft, VmpApplyDftToDftTmpBytes,
     },
@@ -193,12 +193,10 @@ impl<BE: Backend> PackingMaskAggregationDefault<BE> for Module<BE>
 where
     Self: VecZnxCopyBackend<BE>
         + VecZnxTransposeBackend<BE>
-        + VecZnxAutomorphismBackend<BE>
+        + VecZnxAutomorphismRotateBackend<BE>
         + VecZnxAddAssignBackend<BE>
         + VecZnxNormalize<BE>
         + VecZnxNormalizeTmpBytes
-        + VecZnxRotateAssignBackend<BE>
-        + VecZnxRotateAssignTmpBytes
         + VecZnxRshAssignBackend<BE>
         + VecZnxRshTmpBytes
         + VecZnxZeroBackend<BE>
