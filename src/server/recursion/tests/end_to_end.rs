@@ -15,6 +15,8 @@ use poulpy_core::{
     },
 };
 use poulpy_cpu_avx::FFT64Avx;
+
+use crate::database::CoeffMatrix;
 use poulpy_hal::{
     api::{ScratchOwnedAlloc, ScratchOwnedBorrow},
     layouts::{Backend, Module, ScratchOwned, VecZnx, ZnxView, ZnxViewMut, ZnxZero},
@@ -157,15 +159,10 @@ fn run_end_to_end(t: usize, cols: usize, gamma0: usize, i0: usize, i1: usize) {
                 answer[j] = db[j][i0];
             }
         }
-        let mut u = module.coeff_matrix_alloc::<i16>(
-            cols,
-            gamma0,
-            Base2K(base2k as u32),
-            TorusPrecision(base2k as u32),
-        );
+        let mut u = CoeffMatrix::zeros(gamma0, cols);
         for j in 0..gamma0 {
             for k in 0..cols {
-                u.data_mut().at_mut(j, 0)[k] = db[j][k];
+                u.row_mut(j)[k] = db[j][k] as i16;
             }
         }
         let mut res = module.lwe_matrix_alloc_from_infos(&res1_infos);
@@ -324,7 +321,7 @@ fn expand_one_hot(
 fn select_and_decrypt(
     module: &Module<BE>,
     res_infos: &LWEMatrixLayout,
-    db: &poulpy_core::layouts::CoeffMatrix<<BE as Backend>::OwnedBuf, i16>,
+    db: &CoeffMatrix,
     query: &poulpy_core::layouts::LWEMatrix<<BE as Backend>::OwnedBuf>,
     sk_lwe: &LWESecret<<BE as Backend>::OwnedBuf>,
     base2k: usize,
@@ -376,15 +373,10 @@ fn select_digits_chunked(
             base2k: Base2K(base2k as u32),
             k: src_k,
         };
-        let mut db = module.coeff_matrix_alloc::<i16>(
-            t,
-            chunk,
-            Base2K(base2k as u32),
-            TorusPrecision(base2k as u32),
-        );
+        let mut db = CoeffMatrix::zeros(chunk, t);
         for j in 0..chunk {
             for b in 0..t {
-                db.data_mut().at_mut(j, 0)[b] = all_digits[start + j][b] as i64;
+                db.row_mut(j)[b] = all_digits[start + j][b];
             }
         }
         let vals = select_and_decrypt(

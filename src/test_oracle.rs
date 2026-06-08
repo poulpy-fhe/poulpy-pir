@@ -8,8 +8,10 @@
 //! the production `f64` GEMM path, so packing/PIR tests can keep using `U · query`
 //! as a trusted oracle.
 
-use poulpy_core::layouts::{CoeffMatrix, LWEInfos, LWEMatrix};
+use poulpy_core::layouts::{LWEInfos, LWEMatrix};
 use poulpy_hal::layouts::VecZnx;
+
+use crate::database::CoeffMatrix;
 
 /// `res[col] = sum_in U[out, in] * q[in, col] mod 2^torus_bits` for one operand
 /// plane (a mask or a body), written column by column.
@@ -47,19 +49,15 @@ fn matmul_plane(
     }
 }
 
-/// Decodes `U` (a `CoeffMatrix<_, i16>`) into a dense row-major `i64` matrix with
-/// centered-`i16` semantics (the load-bearing `as i16` reduction).
-fn decode_u(u: &CoeffMatrix<Vec<u8>, i16>) -> (Vec<i64>, usize, usize) {
-    let rows_out = u.data().cols();
-    let rows_in = u.data().n();
-    let base2k = u.base2k().as_usize();
-    let k = u.max_k().as_usize();
+/// Decodes `U` (a [`CoeffMatrix`]) into a dense row-major `i64` matrix.
+fn decode_u(u: &CoeffMatrix) -> (Vec<i64>, usize, usize) {
+    let rows_out = u.rows_out();
+    let rows_in = u.rows_in();
     let mut mat = vec![0i64; rows_out * rows_in];
-    let mut row = vec![0i64; rows_in];
     for out in 0..rows_out {
-        u.data().decode_vec_i64(base2k, out, k, &mut row);
+        let row = u.row(out);
         for in_ in 0..rows_in {
-            mat[out * rows_in + in_] = (row[in_] as i16) as i64;
+            mat[out * rows_in + in_] = row[in_] as i64;
         }
     }
     (mat, rows_out, rows_in)
@@ -69,7 +67,7 @@ fn decode_u(u: &CoeffMatrix<Vec<u8>, i16>) -> (Vec<i64>, usize, usize) {
 /// precision is taken from `query` (both operands share the regime).
 pub(crate) fn lwe_matrix_mul_mask(
     res: &mut LWEMatrix<Vec<u8>>,
-    u: &CoeffMatrix<Vec<u8>, i16>,
+    u: &CoeffMatrix,
     query: &LWEMatrix<Vec<u8>>,
 ) {
     let (mat, rows_out, rows_in) = decode_u(u);
@@ -91,7 +89,7 @@ pub(crate) fn lwe_matrix_mul_mask(
 /// Oracle for `lwe_matrix_mul_body`: `res.body = U · query.body`.
 pub(crate) fn lwe_matrix_mul_body(
     res: &mut LWEMatrix<Vec<u8>>,
-    u: &CoeffMatrix<Vec<u8>, i16>,
+    u: &CoeffMatrix,
     query: &LWEMatrix<Vec<u8>>,
 ) {
     let (mat, rows_out, rows_in) = decode_u(u);
@@ -113,7 +111,7 @@ pub(crate) fn lwe_matrix_mul_body(
 /// Oracle for `lwe_matrix_mul`: `res = U · query` (both mask and body).
 pub(crate) fn lwe_matrix_mul(
     res: &mut LWEMatrix<Vec<u8>>,
-    u: &CoeffMatrix<Vec<u8>, i16>,
+    u: &CoeffMatrix,
     query: &LWEMatrix<Vec<u8>>,
 ) {
     lwe_matrix_mul_mask(res, u, query);

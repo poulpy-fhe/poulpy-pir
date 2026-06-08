@@ -1,9 +1,9 @@
 use poulpy_core::{
     GLWEExpandLWEMatrix, GLWEMaskFill,
     layouts::{
-        Base2K, CoeffMatrix, Degree, GLWECompressed, GLWEInfos, GLWEToBackendMut, GLWEToBackendRef,
-        LWEInfos, LWEMatrix, LWEMatrixInfos, LWEMatrixLayout, LWEMatrixToBackendMut,
-        ModuleCoreAlloc, TorusPrecision,
+        Base2K, Degree, GLWECompressed, GLWEInfos, GLWEToBackendMut, GLWEToBackendRef, LWEInfos,
+        LWEMatrix, LWEMatrixInfos, LWEMatrixLayout, LWEMatrixToBackendMut, ModuleCoreAlloc,
+        TorusPrecision,
     },
 };
 use poulpy_hal::{
@@ -15,7 +15,7 @@ use poulpy_hal::{
 
 use poulpy_cpu_ref::reference::fft64::reim::ReimArith;
 
-use crate::{parameters::Parameters, payload::Payload};
+use crate::{database::CoeffMatrix, parameters::Parameters, payload::Payload};
 
 pub(super) fn default_query_mask_tmp_bytes<BE, R, GM>(
     module: &Module<BE>,
@@ -125,20 +125,17 @@ pub(crate) struct PreparedF64 {
 }
 
 impl PreparedF64 {
-    /// Decodes `matrix` into its `f64` panel. The decoded limbs carry centered-`i16`
-    /// semantics, so each entry is reduced mod `2^16` via the load-bearing `as i16`
-    /// truncation (a plain cast / `reim_from_znx` would corrupt full-range entries).
-    pub(crate) fn new(matrix: &CoeffMatrix<Vec<u8>, i16>) -> Self {
-        let rows_out = matrix.data().cols();
-        let rows_in = matrix.data().n();
-        let base2k = matrix.base2k().as_usize();
-        let k = matrix.max_k().as_usize();
+    /// Decodes `matrix` into its `f64` panel. Entries are stored as centered
+    /// `i16` (the database / interpolation `U` operand), so the GEMM-ready value
+    /// is a direct `i16 -> f64` widening.
+    pub(crate) fn new(matrix: &CoeffMatrix) -> Self {
+        let rows_out = matrix.rows_out();
+        let rows_in = matrix.rows_in();
         let mut values = vec![0.0f64; rows_out * rows_in];
-        let mut row = vec![0i64; rows_in];
         for out_row in 0..rows_out {
-            matrix.data().decode_vec_i64(base2k, out_row, k, &mut row);
+            let row = matrix.row(out_row);
             for in_row in 0..rows_in {
-                values[out_row * rows_in + in_row] = (row[in_row] as i16) as f64;
+                values[out_row * rows_in + in_row] = row[in_row] as f64;
             }
         }
         Self {

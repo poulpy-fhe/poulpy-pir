@@ -22,18 +22,17 @@ use std::{
 use faer::{Accum, Par, linalg::matmul::matmul, mat::MatMut, mat::MatRef};
 use matrixmultiply::dgemm;
 use poulpy_core::layouts::{
-    Base2K, CoeffMatrix, Degree, LWEInfos, LWEMatrix, LWEMatrixLayout, ModuleCoreAlloc,
-    TorusPrecision,
+    Base2K, Degree, LWEInfos, LWEMatrix, LWEMatrixLayout, ModuleCoreAlloc, TorusPrecision,
 };
 use poulpy_cpu_avx::FFT64Avx;
 use poulpy_cpu_ref::reference::fft64::reim::ReimArith;
 use poulpy_hal::layouts::{Backend, HostDataMut, Module, ZnxViewMut};
+use poulpy_pir::database::CoeffMatrix;
 
 type BE = FFT64Avx;
 
 const DEFAULT_N: usize = 2048;
 const DEFAULT_ITERS: usize = 5;
-const U_BASE2K: usize = 18;
 const MASK_BASE2K: usize = 32;
 const PACK_BASE2K: usize = 18;
 const TORUS_BITS: usize = 54;
@@ -187,7 +186,7 @@ fn fill_rhs_f64(buf: &mut [f64], seed: u64) {
 struct Bench {
     module: Module<BE>,
     out_infos: LWEMatrixLayout,
-    u: CoeffMatrix<<BE as Backend>::OwnedBuf, i16>,
+    u: CoeffMatrix,
     full_out: LWEMatrix<<BE as Backend>::OwnedBuf>,
     faer_out: LWEMatrix<<BE as Backend>::OwnedBuf>,
     split_out: LWEMatrix<<BE as Backend>::OwnedBuf>,
@@ -217,12 +216,7 @@ impl Bench {
             k: TorusPrecision((TORUS_BITS.div_ceil(MASK_BASE2K) * MASK_BASE2K) as u32),
         };
 
-        let mut u = module.coeff_matrix_alloc::<i16>(
-            n,
-            n,
-            Base2K(U_BASE2K as u32),
-            TorusPrecision(U_BASE2K as u32),
-        );
+        let mut u = CoeffMatrix::zeros(n, n);
         fill_u(&mut u);
 
         let mut a = module.lwe_matrix_alloc_from_infos(&coarse_infos);
@@ -344,13 +338,13 @@ impl Bench {
     }
 }
 
-fn fill_u(u: &mut CoeffMatrix<<BE as Backend>::OwnedBuf, i16>) {
-    let n = u.data().n();
-    for out_row in 0..u.data().cols() {
-        let row = u.data_mut().at_mut(out_row, 0);
+fn fill_u(u: &mut CoeffMatrix) {
+    let n = u.rows_in();
+    for out_row in 0..u.rows_out() {
+        let row = u.row_mut(out_row);
         for (in_row, cell) in row.iter_mut().enumerate().take(n) {
             let x = splitmix64((out_row as u64) << 32 ^ in_row as u64 ^ 0x9e37_79b9_7f4a_7c15);
-            *cell = (x % 65_535) as i64 - 32_767;
+            *cell = ((x % 65_535) as i64 - 32_767) as i16;
         }
     }
 }
@@ -372,17 +366,14 @@ fn fill_a(a: &mut LWEMatrix<<BE as Backend>::OwnedBuf>) {
     a.body_mut().raw_mut().fill(0);
 }
 
-fn decode_coeff_matrix_f64(
-    out: &mut [f64],
-    u: &CoeffMatrix<<BE as Backend>::OwnedBuf, i16>,
-    n: usize,
-) {
+fn decode_coeff_matrix_f64(out: &mut [f64], u: &CoeffMatrix, n: usize) {
     let mut row = vec![0i64; n];
     for out_row in 0..n {
-        u.data()
-            .decode_vec_i64(U_BASE2K, out_row, U_BASE2K, &mut row);
-        // i16-bounded entries decode to their centered values directly, so cast
-        // i64 -> f64 with the backend kernel (as `decode_coeff_matrix_f64` does).
+        for (slot, &v) in row.iter_mut().zip(u.row(out_row)) {
+            *slot = v as i64;
+        }
+        // i16-bounded entries widen to their centered values; use the backend
+        // kernel for the i64 -> f64 cast (as the production path does).
         FFT64Avx::reim_from_znx(&mut out[out_row * n..(out_row + 1) * n], &row);
     }
 }

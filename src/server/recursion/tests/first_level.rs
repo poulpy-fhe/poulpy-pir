@@ -13,6 +13,8 @@ use poulpy_core::{
     },
 };
 use poulpy_cpu_avx::FFT64Avx;
+
+use crate::database::CoeffMatrix;
 use poulpy_hal::{
     api::{ScratchOwnedAlloc, ScratchOwnedBorrow},
     layouts::{Backend, Module, ScratchOwned, VecZnx, ZnxView, ZnxViewMut, ZnxZero},
@@ -112,15 +114,10 @@ fn run_first_level(cols: usize, gamma: usize, i0: usize) {
         .collect();
     let expected: Vec<i64> = (0..gamma).map(|j| db[j][i0]).collect();
 
-    let mut u = module.coeff_matrix_alloc::<i16>(
-        cols,
-        gamma,
-        Base2K(base2k as u32),
-        TorusPrecision(base2k as u32),
-    );
+    let mut u = CoeffMatrix::zeros(gamma, cols);
     for j in 0..gamma {
         for k in 0..cols {
-            u.data_mut().at_mut(j, 0)[k] = db[j][k];
+            u.row_mut(j)[k] = db[j][k] as i16;
         }
     }
 
@@ -324,15 +321,10 @@ fn run_first_level_batched(t: usize, cols: usize, gamma: usize, i0: usize) {
             .collect();
         expected.push((0..gamma).map(|j| db[j][i0]).collect());
 
-        let mut u = module.coeff_matrix_alloc::<i16>(
-            cols,
-            gamma,
-            Base2K(base2k as u32),
-            TorusPrecision(base2k as u32),
-        );
+        let mut u = CoeffMatrix::zeros(gamma, cols);
         for j in 0..gamma {
             for k in 0..cols {
-                u.data_mut().at_mut(j, 0)[k] = db[j][k];
+                u.row_mut(j)[k] = db[j][k] as i16;
             }
         }
         let mut res = module.lwe_matrix_alloc_from_infos(&res_infos);

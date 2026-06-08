@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use poulpy_core::{
     GLWENormalize,
     layouts::{
-        Base2K, Degree, GLWE, GLWEAutomorphismKeyCompressed, GLWECompressed, LWEInfos, LWEMatrix,
-        LWEMatrixLayout, LWEMatrixToBackendMut, ModuleCoreAlloc, TorusPrecision,
+        Degree, GLWE, GLWEAutomorphismKeyCompressed, GLWECompressed, LWEInfos, LWEMatrix,
+        LWEMatrixLayout, LWEMatrixToBackendMut,
     },
 };
 use poulpy_hal::{
@@ -17,12 +17,13 @@ use poulpy_hal::{
     },
     layouts::{
         Backend, HostDataMut, HostDataRef, Module, ScratchOwned, VecZnx, VecZnxToBackendMut,
-        VecZnxToBackendRef, ZnxViewMut,
+        VecZnxToBackendRef,
     },
 };
 
 use crate::{
     config::Collapse,
+    database::CoeffMatrix,
     packing::{
         Packing, PackingKeys, PackingMaskAggregation, PackingPrecomputations,
         recursion::partial_pack_batch,
@@ -139,17 +140,13 @@ where
             let mut row_prep: Vec<PreparedF64> = Vec::with_capacity(q_masks.len());
             for block in 0..q_masks.len() {
                 let start = block * n;
-                let mut db = module.coeff_matrix_alloc::<i16>(
-                    n,
-                    gamma,
-                    Base2K(base2k as u32),
-                    TorusPrecision(base2k as u32),
-                );
+                let mut db = CoeffMatrix::zeros(gamma, n);
                 for j in 0..gamma {
                     let idx = m * gamma + j;
+                    let row = db.row_mut(j);
                     for b in 0..n {
-                        db.data_mut().at_mut(j, 0)[b] = if idx < total && start + b < t {
-                            all_digits[idx][start + b] as i64
+                        row[b] = if idx < total && start + b < t {
+                            all_digits[idx][start + b]
                         } else {
                             0
                         };

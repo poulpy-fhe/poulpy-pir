@@ -14,11 +14,13 @@
 //! [`Payload`]: crate::payload::Payload
 
 mod address;
+mod coeff_matrix;
 mod layout;
 mod preprocessing;
 mod storage;
 
 pub use address::{Address, PayloadAddress};
+pub use coeff_matrix::CoeffMatrix;
 pub use layout::DatabaseLayout;
 pub use preprocessing::DatabasePreprocessingConfig;
 pub use storage::Database;

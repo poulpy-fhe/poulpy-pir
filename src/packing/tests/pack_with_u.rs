@@ -12,48 +12,21 @@ use crate::packing::{
 use poulpy_core::{
     EncryptionLayout, GLWECompressedEncryptSk, GLWEDecrypt, GLWEExpandLWEMatrix, LWEMatrixDecrypt,
     layouts::{
-        Base2K, CoeffMatrixInfos, Degree, GLWEAutomorphismKeyLayout, GLWEDecompress, GLWELayout,
-        GLWEPlaintext, GLWESecret, GLWESecretPreparedFactory, LWEInfos, LWEMatrixLayout, LWESecret,
+        Base2K, Degree, GLWEAutomorphismKeyLayout, GLWEDecompress, GLWELayout, GLWEPlaintext,
+        GLWESecret, GLWESecretPreparedFactory, LWEInfos, LWEMatrixLayout, LWESecret,
         ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank, SecretConversion, TorusPrecision,
     },
 };
 use poulpy_cpu_avx::FFT64Avx;
+
+use crate::database::CoeffMatrix;
 use poulpy_hal::{
     api::{ScalarZnxAutomorphismBackend, ScratchOwnedAlloc, ScratchOwnedBorrow},
-    layouts::{
-        Backend, Module, ScalarZnxToBackendMut, ScalarZnxToBackendRef, ScratchOwned, ZnxViewMut,
-    },
+    layouts::{Backend, Module, ScalarZnxToBackendMut, ScalarZnxToBackendRef, ScratchOwned},
     source::Source,
 };
 
 const N: usize = 64;
-
-/// Local `i16` coefficient-matrix layout for the database multiplier `U`.
-struct CoeffLayout {
-    n: Degree,
-    rows_out: usize,
-    base2k: Base2K,
-    k: TorusPrecision,
-}
-
-impl LWEInfos for CoeffLayout {
-    fn base2k(&self) -> Base2K {
-        self.base2k
-    }
-    fn n(&self) -> Degree {
-        self.n
-    }
-    fn size(&self) -> usize {
-        self.k.as_usize().div_ceil(self.base2k.as_usize())
-    }
-}
-
-impl CoeffMatrixInfos for CoeffLayout {
-    type Bound = i16;
-    fn rows_out(&self) -> usize {
-        self.rows_out
-    }
-}
 
 fn run() {
     type BE = FFT64Avx;
@@ -81,12 +54,6 @@ fn run() {
         n: Degree(n as u32),
         base2k: src_infos.base2k(),
         k: src_infos.max_k(),
-    };
-    let _u_infos = CoeffLayout {
-        n: Degree(n as u32),
-        rows_out: n,
-        base2k: Base2K(base2k as u32),
-        k: TorusPrecision(base2k as u32),
     };
     let key_infos = EncryptionLayout::new_from_default_sigma(GLWEAutomorphismKeyLayout {
         n: Degree(n as u32),
@@ -152,14 +119,9 @@ fn run() {
 
     // Database multiplier U: a cyclic-shift permutation (row i selects query row
     // (i + 1) mod n). This is a non-diagonal U applied to the expanded query.
-    let mut u = module.coeff_matrix_alloc::<i16>(
-        n,
-        n,
-        Base2K(base2k as u32),
-        TorusPrecision(base2k as u32),
-    );
+    let mut u = CoeffMatrix::zeros(n, n);
     for i in 0..n {
-        u.data_mut().at_mut(i, 0)[(i + 1) % n] = 1;
+        u.row_mut(i)[(i + 1) % n] = 1;
     }
 
     // product = U * expand(query): mask (precompute side) then body (hot side).

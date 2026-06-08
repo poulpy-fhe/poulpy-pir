@@ -3,7 +3,7 @@ use crate::{
     payload::{Payload, U256P65535},
 };
 use poulpy_cpu_ref::FFT64Ref;
-use poulpy_hal::layouts::{Module, ZnxView};
+use poulpy_hal::layouts::Module;
 
 type BE = FFT64Ref;
 type L = DatabaseLayout<U256P65535>;
@@ -68,12 +68,12 @@ fn database_encode_shard_roundtrips_via_matrix_inspection() {
         let sub = &db.matrices()[m * block_cols + block];
         let mut digits = vec![0i16; digits_per];
         for (k, slot) in digits.iter_mut().enumerate() {
-            let stored = sub.data().at(row_out_start + k, 0)[row_in];
+            let stored = sub.row(row_out_start + k)[row_in];
             assert!(
                 (-32767..=32767).contains(&stored),
                 "stored value {stored} outside centred Z_65535 range at e={e}, k={k}",
             );
-            *slot = stored as i16;
+            *slot = stored;
         }
         let mut got = [0u8; 32];
         U256P65535::decode(&mut got, &digits);

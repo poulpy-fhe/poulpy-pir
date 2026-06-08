@@ -14,6 +14,8 @@ use poulpy_core::{
     },
 };
 use poulpy_cpu_avx::FFT64Avx;
+
+use crate::database::CoeffMatrix;
 use poulpy_hal::{
     api::{ScratchOwnedAlloc, ScratchOwnedBorrow},
     layouts::{Backend, Module, ScratchOwned, VecZnx, ZnxView, ZnxViewMut, ZnxZero},
@@ -172,18 +174,13 @@ fn run_second_level_body_select(t: usize, gamma0: usize, i1: usize) {
 
     // --- D1_body: reshape resp0 body digits into a plaintext CoeffMatrix<i16>. ---
     // Digit index j = c*τ + l for body coeff c∈[γ0], limb l∈[τ]; columns = batches.
-    let mut d1_body = module.coeff_matrix_alloc::<i16>(
-        t,
-        n_digits,
-        Base2K(base2k as u32),
-        TorusPrecision(base2k as u32),
-    );
+    let mut d1_body = CoeffMatrix::zeros(n_digits, t);
     for (k, glwe) in resp0.iter().enumerate() {
         let data = glwe.data();
         for c in 0..gamma0 {
             for l in 0..tau {
                 let j = c * tau + l;
-                d1_body.data_mut().at_mut(j, 0)[k] = data.at(0, l)[c]; // body column 0
+                d1_body.row_mut(j)[k] = data.at(0, l)[c] as i16; // body column 0
             }
         }
     }

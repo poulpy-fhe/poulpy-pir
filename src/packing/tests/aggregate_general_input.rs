@@ -17,12 +17,14 @@ use crate::packing::PackingMaskAggregation;
 use poulpy_core::{
     EncryptionLayout, GLWECompressedEncryptSk, GLWEExpandLWEMatrix, LWEMatrixDecrypt,
     layouts::{
-        Base2K, CoeffMatrixInfos, Degree, GLWEDecompress, GLWELayout, GLWESecretPreparedFactory,
-        LWEInfos, LWEMatrixLayout, ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank,
-        SecretConversion, TorusPrecision,
+        Base2K, Degree, GLWEDecompress, GLWELayout, GLWESecretPreparedFactory, LWEInfos,
+        LWEMatrixLayout, ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank, SecretConversion,
+        TorusPrecision,
     },
 };
 use poulpy_cpu_avx::FFT64Avx;
+
+use crate::database::CoeffMatrix;
 use poulpy_hal::{
     api::{
         ScalarZnxAutomorphismBackend, ScratchOwnedAlloc, ScratchOwnedBorrow, SvpApplyDft,
@@ -33,37 +35,11 @@ use poulpy_hal::{
         GaloisElement, Module, ScalarZnxToBackendMut, ScalarZnxToBackendRef, ScratchOwned,
         SvpPPolToBackendMut, SvpPPolToBackendRef, VecZnxBigToBackendMut, VecZnxBigToBackendRef,
         VecZnxDftToBackendMut, VecZnxDftToBackendRef, VecZnxToBackendMut, VecZnxToBackendRef,
-        ZnxViewMut,
     },
     source::Source,
 };
 
 const N: usize = 64;
-
-/// Local `i16` coefficient-matrix layout for the database multiplier `U`.
-struct CoeffLayout {
-    n: Degree,
-    rows_out: usize,
-    base2k: Base2K,
-    k: TorusPrecision,
-}
-impl LWEInfos for CoeffLayout {
-    fn base2k(&self) -> Base2K {
-        self.base2k
-    }
-    fn n(&self) -> Degree {
-        self.n
-    }
-    fn size(&self) -> usize {
-        self.k.as_usize().div_ceil(self.base2k.as_usize())
-    }
-}
-impl CoeffMatrixInfos for CoeffLayout {
-    type Bound = i16;
-    fn rows_out(&self) -> usize {
-        self.rows_out
-    }
-}
 
 fn run() {
     type BE = FFT64Avx;
@@ -86,13 +62,6 @@ fn run() {
         base2k: src_infos.base2k(),
         k: src_infos.max_k(),
     };
-    let _u_infos = CoeffLayout {
-        n: Degree(n as u32),
-        rows_out: n,
-        base2k,
-        k: TorusPrecision(18),
-    };
-
     let mut scratch = ScratchOwned::<BE>::alloc(
         module
             .glwe_compressed_encrypt_sk_tmp_bytes(&src_infos)
@@ -126,9 +95,9 @@ fn run() {
     );
 
     // Non-diagonal U: cyclic-shift permutation (row i selects query row (i+1)).
-    let mut u = module.coeff_matrix_alloc::<i16>(n, n, base2k, TorusPrecision(18));
+    let mut u = CoeffMatrix::zeros(n, n);
     for i in 0..n {
-        u.data_mut().at_mut(i, 0)[(i + 1) % n] = 1;
+        u.row_mut(i)[(i + 1) % n] = 1;
     }
 
     // Expand the compressed query to an LWE matrix, then apply U via the test

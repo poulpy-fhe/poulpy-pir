@@ -1,35 +1,38 @@
 use std::marker::PhantomData;
 
-use poulpy_core::layouts::{Base2K, CoeffMatrix, ModuleCoreAlloc, TorusPrecision};
-use poulpy_hal::layouts::{Backend, Module, ZnxView, ZnxViewMut};
+use poulpy_core::layouts::ModuleCoreAlloc;
+use poulpy_hal::layouts::{Backend, Module};
 
 use crate::payload::Payload;
 
-use super::{address::Address, layout::DatabaseLayout, preprocessing::DatabasePreprocessingConfig};
+use super::{
+    CoeffMatrix, address::Address, layout::DatabaseLayout,
+    preprocessing::DatabasePreprocessingConfig,
+};
 
 /// The raw PIR database: `physical_rows · block_cols` `n x n` `i16`
 /// coefficient sub-matrices, ordered `matrices[row_group · block_cols + block]`.
 /// InsPIRe² keeps `gamma0` logical records inside each physical `n`-row group,
 /// so the storage layout stays shared with interpolation.
 pub struct Database<BE: Backend, P> {
-    matrices: Vec<CoeffMatrix<BE::OwnedBuf, i16>>,
+    matrices: Vec<CoeffMatrix>,
     n: usize,
     base2k: usize,
     cols: usize,
     grid_rows: usize,
     physical_rows: usize,
     preprocessing: DatabasePreprocessingConfig,
-    _payload: PhantomData<P>,
+    _marker: PhantomData<(BE, P)>,
 }
 
 impl<BE: Backend, P: Payload<[u8; 32]>> Database<BE, P> {
     /// The flat list of `n x n` sub-matrices (`matrix · block_cols + block`).
-    pub fn matrices(&self) -> &[CoeffMatrix<BE::OwnedBuf, i16>] {
+    pub fn matrices(&self) -> &[CoeffMatrix] {
         &self.matrices
     }
 
     /// Mutable view of the sub-matrices (used by the in-place interpolation).
-    pub fn matrices_mut(&mut self) -> &mut [CoeffMatrix<BE::OwnedBuf, i16>] {
+    pub fn matrices_mut(&mut self) -> &mut [CoeffMatrix] {
         &mut self.matrices
     }
 
@@ -113,13 +116,13 @@ impl<BE: Backend, P: Payload<[u8; 32]>> Database<BE, P> {
     }
 
     /// The raw coefficient blocks.
-    pub fn blocks(&self) -> &[CoeffMatrix<BE::OwnedBuf, i16>] {
+    pub fn blocks(&self) -> &[CoeffMatrix] {
         &self.matrices
     }
 
     /// The physical coefficient block for `grid_row` and first-dimension
     /// `column_block`.
-    pub fn block(&self, grid_row: usize, column_block: usize) -> &CoeffMatrix<BE::OwnedBuf, i16> {
+    pub fn block(&self, grid_row: usize, column_block: usize) -> &CoeffMatrix {
         assert!(
             grid_row < self.grid_rows,
             "grid row {grid_row} out of bounds"
@@ -133,11 +136,7 @@ impl<BE: Backend, P: Payload<[u8; 32]>> Database<BE, P> {
     }
 
     /// The physical `n x n` block for one row group and column block.
-    pub fn physical_block(
-        &self,
-        row_group: usize,
-        column_block: usize,
-    ) -> &CoeffMatrix<BE::OwnedBuf, i16> {
+    pub fn physical_block(&self, row_group: usize, column_block: usize) -> &CoeffMatrix {
         assert!(
             row_group < self.physical_rows,
             "physical row group {row_group} out of bounds"
@@ -209,14 +208,7 @@ where
         let rows_per_group = n / column_height;
         let physical_rows = grid_rows.div_ceil(rows_per_group);
         let matrices = (0..physical_rows * layout.column_blocks(n))
-            .map(|_| {
-                module.coeff_matrix_alloc::<i16>(
-                    n,
-                    n,
-                    Base2K(base2k as u32),
-                    TorusPrecision(base2k as u32),
-                )
-            })
+            .map(|_| CoeffMatrix::zeros(n, n))
             .collect();
         Self {
             matrices,
@@ -226,7 +218,7 @@ where
             grid_rows,
             physical_rows,
             preprocessing,
-            _payload: PhantomData,
+            _marker: PhantomData,
         }
     }
 
@@ -242,14 +234,7 @@ where
         );
         let blocks = cols / n;
         let matrices = (0..(db_entries / per_matrix) * blocks)
-            .map(|_| {
-                module.coeff_matrix_alloc::<i16>(
-                    n,
-                    n,
-                    Base2K(base2k as u32),
-                    TorusPrecision(base2k as u32),
-                )
-            })
+            .map(|_| CoeffMatrix::zeros(n, n))
             .collect();
         Self {
             matrices,
@@ -259,7 +244,7 @@ where
             grid_rows: db_entries / per_matrix,
             physical_rows: db_entries / per_matrix,
             preprocessing: DatabasePreprocessingConfig::new::<P>(n),
-            _payload: PhantomData,
+            _marker: PhantomData,
         }
     }
 
@@ -283,8 +268,7 @@ where
             let sub = &mut self.matrices[matrix_idx];
             P::encode(&mut digits, payload);
             for (k, &d) in digits.iter().enumerate() {
-                sub.data_mut().at_mut(row_out_base + addr.row_offset + k, 0)[col_in_block] =
-                    d as i64;
+                sub.row_mut(row_out_base + addr.row_offset + k)[col_in_block] = d;
             }
         }
     }
@@ -323,7 +307,7 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Database<BE, P> {
             self.matrix_index_and_column(grid_row, column);
         let block = &mut self.matrices[matrix_idx];
         for (j, &v) in digits.iter().enumerate() {
-            block.data_mut().at_mut(row_out_base + row_offset + j, 0)[col_in_block] = v;
+            block.row_mut(row_out_base + row_offset + j)[col_in_block] = v as i16;
         }
     }
 
@@ -342,8 +326,10 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Database<BE, P> {
         let (matrix_idx, row_out_base, col_in_block) =
             self.matrix_index_and_column(grid_row, column);
         let block = &self.matrices[matrix_idx];
+        // Recover the canonical `[0, p)` residue: digits are stored as the `i16`
+        // bit pattern of a `Z_p` value (`p <= 2^16`), so reinterpret unsigned.
         (0..len)
-            .map(|j| block.data().at(row_out_base + row_offset + j, 0)[col_in_block])
+            .map(|j| block.row(row_out_base + row_offset + j)[col_in_block] as u16 as i64)
             .collect()
     }
 

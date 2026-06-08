@@ -14,9 +14,9 @@
 use poulpy_core::{
     GGSWEncryptSk,
     layouts::{
-        Base2K, CoeffMatrix, GGSW, GGSWInfos, GGSWPrepared, GGSWPreparedFactory,
-        GGSWPreparedToBackendRef, GLWE, GLWEAutomorphismKeyCompressed, GLWEInfos, GLWEToBackendMut,
-        GLWEToBackendRef, ModuleCoreAlloc, TorusPrecision,
+        GGSW, GGSWInfos, GGSWPrepared, GGSWPreparedFactory, GGSWPreparedToBackendRef, GLWE,
+        GLWEAutomorphismKeyCompressed, GLWEInfos, GLWEToBackendMut, GLWEToBackendRef,
+        ModuleCoreAlloc,
     },
 };
 use poulpy_hal::{
@@ -29,7 +29,7 @@ use poulpy_hal::{
 
 use crate::{
     client::{QueryCommon, QueryContext},
-    database::{Database, DatabaseLayout, PayloadAddress},
+    database::{CoeffMatrix, Database, DatabaseLayout, PayloadAddress},
     encoding::ModPEncoder,
     interpolation::{HornerCoeffs, HornerEvaluation, MonomialInterpolation},
     parameters::Parameters,
@@ -88,17 +88,17 @@ impl<BE: Backend> InterpolationResponse<BE> {
 /// own matrices (overwritten), the `interpolation_t − nb_matrices` tail panels
 /// in [`tail`](Self::tail). [`panel`](Self::panel) presents all `interpolation_t`
 /// panels uniformly as `k_blocks` sub-matrices each.
-pub struct Interpolated<'a, BE: Backend> {
-    db_matrices: &'a [CoeffMatrix<BE::OwnedBuf, i16>],
-    tail: Vec<CoeffMatrix<BE::OwnedBuf, i16>>,
+pub struct Interpolated<'a> {
+    db_matrices: &'a [CoeffMatrix],
+    tail: Vec<CoeffMatrix>,
     nb_matrices: usize,
     k_blocks: usize,
 }
 
-impl<BE: Backend> Interpolated<'_, BE> {
+impl Interpolated<'_> {
     /// Panel `k`'s `k_blocks` `U` sub-matrices (`db` for `k < nb_matrices`,
     /// otherwise the tail).
-    pub fn panel(&self, k: usize) -> &[CoeffMatrix<BE::OwnedBuf, i16>] {
+    pub fn panel(&self, k: usize) -> &[CoeffMatrix] {
         let kb = self.k_blocks;
         if k < self.nb_matrices {
             &self.db_matrices[k * kb..k * kb + kb]
@@ -152,7 +152,7 @@ impl Interpolation {
         db: &'a mut Database<BE, P>,
         encoder: &ModPEncoder,
         scratch: &mut ScratchOwned<BE>,
-    ) -> Interpolated<'a, BE>
+    ) -> Interpolated<'a>
     where
         Module<BE>: ModuleN + ModuleCoreAlloc<OwnedBuf = Vec<u8>> + MonomialInterpolation<BE>,
         ScratchOwned<BE>: ScratchOwnedBorrow<BE>,
@@ -164,19 +164,11 @@ impl Interpolation {
         let kb = self.k_blocks;
         let nb = self.nb_matrices;
         let t = self.interpolation_t;
-        let base2k = db.base2k();
         let inv_t = encoder.inv(t as i64);
 
         // Tail storage, panel-major: tail[(j - nb) * kb + bc].
-        let mut tail: Vec<CoeffMatrix<Vec<u8>, i16>> = (0..(t - nb) * kb)
-            .map(|_| {
-                module.coeff_matrix_alloc::<i16>(
-                    n,
-                    n,
-                    Base2K(base2k as u32),
-                    TorusPrecision(base2k as u32),
-                )
-            })
+        let mut tail: Vec<CoeffMatrix> = (0..(t - nb) * kb)
+            .map(|_| CoeffMatrix::zeros(n, n))
             .collect();
 
         // Working set of `t` polynomials (n cols, one limb), reused across blocks.
@@ -187,9 +179,12 @@ impl Interpolation {
             // Load the nb_matrices evaluation panels; zero-pad up to interpolation_t.
             for (m, w) in working.iter_mut().enumerate() {
                 if m < nb {
-                    let src = db.matrices()[m * kb + bc].data();
+                    let src = &db.matrices()[m * kb + bc];
                     for col in 0..n {
-                        w.at_mut(col, 0).copy_from_slice(src.at(col, 0));
+                        let w_col = w.at_mut(col, 0);
+                        for (wv, &sv) in w_col.iter_mut().zip(src.row(col).iter()) {
+                            *wv = sv as i64;
+                        }
                     }
                 } else {
                     for col in 0..n {
@@ -206,15 +201,15 @@ impl Interpolation {
             // Scale by inv_t and write each panel back (db for j < nb, else tail).
             for (j, w) in working.iter().enumerate() {
                 let dst = if j < nb {
-                    db.matrices_mut()[j * kb + bc].data_mut()
+                    &mut db.matrices_mut()[j * kb + bc]
                 } else {
-                    tail[(j - nb) * kb + bc].data_mut()
+                    &mut tail[(j - nb) * kb + bc]
                 };
                 for col in 0..n {
                     let s = w.at(col, 0);
-                    let d = dst.at_mut(col, 0);
+                    let d = dst.row_mut(col);
                     for (out, &raw) in d.iter_mut().zip(s.iter()) {
-                        *out = encoder.mul(raw, inv_t);
+                        *out = encoder.mul(raw, inv_t) as i16;
                     }
                 }
             }
@@ -262,9 +257,12 @@ impl Interpolation {
         for bc in 0..kb {
             for (m, w) in working.iter_mut().enumerate() {
                 if m < nb {
-                    let src = plain.matrices()[m * kb + bc].data();
+                    let src = &plain.matrices()[m * kb + bc];
                     for col in 0..n {
-                        w.at_mut(col, 0).copy_from_slice(src.at(col, 0));
+                        let w_col = w.at_mut(col, 0);
+                        for (wv, &sv) in w_col.iter_mut().zip(src.row(col).iter()) {
+                            *wv = sv as i64;
+                        }
                     }
                 } else {
                     for col in 0..n {
@@ -276,12 +274,12 @@ impl Interpolation {
                 module.monomial_interpolate(&mut working, col, &mut scratch.borrow());
             }
             for (j, w) in working.iter().enumerate() {
-                let dst = matrix.matrices_mut()[j * kb + bc].data_mut();
+                let dst = &mut matrix.matrices_mut()[j * kb + bc];
                 for col in 0..n {
                     let s = w.at(col, 0);
-                    let d = dst.at_mut(col, 0);
+                    let d = dst.row_mut(col);
                     for (out, &raw) in d.iter_mut().zip(s.iter()) {
-                        *out = encoder.mul(raw, inv_t);
+                        *out = encoder.mul(raw, inv_t) as i16;
                     }
                 }
             }

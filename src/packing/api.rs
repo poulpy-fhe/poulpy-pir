@@ -10,22 +10,17 @@
 
 use poulpy_core::EncryptionInfos;
 use poulpy_core::layouts::{
-    CoeffBound, CoeffMatrix, GGLWECompressedSeed, GGLWEInfos, GLWEAutomorphismKeyCompressed,
-    GLWEInfos, GLWEToBackendMut, GLWEToBackendRef, GetGaloisElement, LWEInfos, LWEMatrix,
-    LWEMatrixInfos, LWESecretToBackendRef, compressed::GGLWECompressedToBackendRef,
-    prepared::GLWESecretPreparedToBackendRef,
+    GGLWECompressedSeed, GGLWEInfos, GLWEAutomorphismKeyCompressed, GLWEInfos, GLWEToBackendMut,
+    GetGaloisElement, LWESecretToBackendRef, compressed::GGLWECompressedToBackendRef,
 };
 use poulpy_hal::layouts::{
-    Backend, ScratchArena, Stats, VecZnxToBackendMut, VecZnxToBackendRef, ZnxInfos,
+    Backend, ScratchArena, VecZnxToBackendMut, VecZnxToBackendRef, ZnxInfos,
 };
 use poulpy_hal::source::Source;
 
-use crate::{
-    encoding::ModPEncoder,
-    packing::{
-        PackingKeys,
-        packing_precomputations::{PackingPrecomputations, PackingPrecomputeInfos},
-    },
+use crate::packing::{
+    PackingKeys,
+    packing_precomputations::{PackingPrecomputations, PackingPrecomputeInfos},
 };
 
 /// Aggregates a DB-multiplied LWE mask matrix into the mask layout consumed by packing.
@@ -261,60 +256,4 @@ pub trait PackingKeysGenerate<BE: Backend> {
     where
         E: EncryptionInfos + GGLWEInfos,
         S: LWESecretToBackendRef<BE>;
-}
-
-/// Diagnostic helper for checking the noise of a DB-selected LWE matrix product.
-///
-/// The expected plaintext is built from `coeffs[:, column]`, using `encoder`
-/// to match the `1/p` one-hot query encoding. The `product` is decrypted with
-/// [`poulpy_core::LWEMatrixDecrypt`] and the resulting plaintext error is
-/// reported through [`poulpy_core::GLWENoise`].
-pub trait LWEMatrixCoeffNoise<BE: Backend> {
-    /// Scratch estimate for [`LWEMatrixCoeffNoise::lwe_matrix_coeff_noise`].
-    fn lwe_matrix_coeff_noise_tmp_bytes<P>(&self, product: &P) -> usize
-    where
-        P: LWEMatrixInfos;
-
-    /// Decrypts `product`, compares it to the selected coefficient column, and
-    /// returns max/std noise statistics.
-    fn lwe_matrix_coeff_noise<BU, S>(
-        &self,
-        coeffs: &CoeffMatrix<BE::OwnedBuf, BU>,
-        column: usize,
-        product: &LWEMatrix<BE::OwnedBuf>,
-        sk_lwe: &S,
-        encoder: &ModPEncoder,
-        scratch: &mut ScratchArena<'_, BE>,
-    ) -> Stats
-    where
-        BU: CoeffBound,
-        S: LWESecretToBackendRef<BE> + LWEInfos;
-}
-
-/// Diagnostic helper for checking the noise of a packed GLWE coefficient product.
-///
-/// The expected plaintext is built from `coeffs[:, column]`, using `encoder`
-/// to match the `1/p` one-hot query encoding. The packed GLWE is compared with
-/// [`poulpy_core::GLWENoise`] under the provided prepared GLWE secret key.
-pub trait GLWECoeffNoise<BE: Backend> {
-    /// Scratch estimate for [`GLWECoeffNoise::glwe_coeff_noise`].
-    fn glwe_coeff_noise_tmp_bytes<G>(&self, glwe: &G) -> usize
-    where
-        G: GLWEInfos;
-
-    /// Compares `glwe` to the selected coefficient column and returns max/std
-    /// noise statistics.
-    fn glwe_coeff_noise<BU, G, S>(
-        &self,
-        coeffs: &CoeffMatrix<BE::OwnedBuf, BU>,
-        column: usize,
-        glwe: &G,
-        sk_glwe: &S,
-        encoder: &ModPEncoder,
-        scratch: &mut ScratchArena<'_, BE>,
-    ) -> Stats
-    where
-        BU: CoeffBound,
-        G: GLWEToBackendRef<BE> + GLWEInfos,
-        S: GLWESecretPreparedToBackendRef<BE> + GLWEInfos;
 }
