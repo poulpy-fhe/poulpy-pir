@@ -1,8 +1,14 @@
 # InsPIRe (interpolation) MISMATCH — root-cause report
 
-**Status:** root cause localized to the **plaintext interpolation**, specifically the
-**axis (row vs column) on which the local `CoeffMatrix` is interpolated**. The entire
-homomorphic pipeline is proven bit-exact correct. InsPIRe² (recursion) is unaffected.
+**Status:** **FIXED.** Root cause was the **axis (row vs column) on which the local
+`CoeffMatrix` is interpolated**. The entire homomorphic pipeline was already bit-exact
+correct; the wrong value came purely from the plaintext interpolation. Fix:
+transpose the interpolation load/store so the IDFT rotates the packed (`R`) axis.
+After the fix `retrieved payload : OK` (`got == want`). InsPIRe² (recursion) unaffected.
+
+> **Open caveat (separate issue):** the *reported* final noise number is unreliable —
+> see "Noise-measurement caveat" below. Correctness is established by value-level
+> checks that do not depend on it.
 
 **Regression introduced by:** `cd76cdc` *"Add local coeffmatrix"* (the removal of the
 HAL-level homomorphic coefficient-matrix product, replaced by the local `i16`
@@ -111,36 +117,77 @@ effectively a missing transpose between "interpolation axis" and "packed axis".
 
 ---
 
-## Fix direction
+## Fix (applied)
 
-Make the interpolation operate on the **same axis that the pack extracts and the Horner
-rotates** (the `R`/row axis that carries the payload). Concretely, one of:
+Transpose the interpolation **load and store** in `Interpolation::prepare` and
+`Interpolation::interpolate_into` (`src/interpolation/strategy.rs`) so
+`monomial_interpolate` runs over the matrix **columns over the `R` axis** — the axis the
+packed GLWE / Horner reconstruct along:
 
-- transpose the load/store in `prepare` / `interpolate_into` so `monomial_interpolate`
-  runs over the column (`C`) that is later packed — i.e. interpolate `src` columns, not
-  `src` rows; **or**
-- equivalently, restore the transpose the old base2k `CoeffMatrix` orientation provided.
+- **load**: `working[m]` column `c` ← matrix column `c` taken over rows `R`
+  (`working[m].at(c,0)[r] = src.row(r)[c]`);
+- **store**: `dst.row(r)[c] = working_c[r] · inv_t`.
 
-Whichever is chosen, the invariant to enforce is:
+Storage, the `f64` GEMM, the oracle, and recursion are **untouched**, so the fix is
+recursion-safe (verified: recursion still `OK`).
 
-> the axis `monomial_interpolate` rotates (its IDFT twiddle / monomial axis) **must
-> equal** the axis the packed GLWE uses as its polynomial coefficient axis (the
-> `R`/row axis along which `storage` lays out a record).
+Invariant enforced:
 
-## Verification
+> the axis `monomial_interpolate` rotates (its IDFT twiddle / monomial axis) **equals**
+> the axis the packed GLWE uses as its polynomial coefficient axis (the `R`/row axis
+> along which `storage` lays out a record).
 
-1. **Existing instrumentation:** re-run `cargo run --release --example pir -- interpolation`.
-   Expect `retrieved payload : OK` and `NOISE log2(std) ≈ -28` (like recursion). The
-   debug lines `first_step[*] 0/0`, `packed[*] 0/0`, and
-   `plaintext-horner vs decrypt(selected) 0/2048` should stay green (they already are);
-   the new green is `got == want`.
-2. **Point/axis probe (optional):** for each interpolation point `m`, plaintext-Horner
-   the produced `U` columns at `X^{m·2n/t}` and check which raw DB matrix it
-   reconstructs. After the fix, point `m` reconstructs raw matrix `m` (diagonal).
-3. **Add a unit test** that round-trips `interpolate` → plaintext-Horner for the
-   `nb_matrices == interpolation_t` natural case and asserts it recovers the raw DB
-   column. The current `interpolate_*` unit tests pass despite the bug, so they do not
-   cover the row-vs-column axis distinction that the pack/Horner imposes.
+### Efficiency
+
+A naïve element-wise transpose over the `Vec<Vec<i16>>` `CoeffMatrix` is strided and
+blew the offline `interpolate` step up from **4.7 s → 22 s**. The load/store are done
+through cache-blocked helpers (`load_matrix_transposed` / `store_matrix_transposed`,
+`INTERP_TILE = 64`), bringing it back to **5.7 s** (≈ 1 s transpose overhead). The
+transpose is inherent (the data is stored with `R` as rows but must be interpolated over
+`R`); blocking keeps the strided side L1-resident per tile.
+
+## Verification (post-fix, observed)
+
+`cargo run --release --example pir -- interpolation`:
+
+```
+first_step[*]  U·(A,b)  0 / 0          (unchanged — was already correct)
+packed[*]      value    0 / 0          (unchanged)
+plaintext-horner vs decrypt(selected)  0 / 2048
+got == want
+retrieved payload : OK
+```
+
+Recursion still `OK`. **Recommended follow-up:** add a unit test that round-trips
+`interpolate` → plaintext-Horner for the `nb_matrices == interpolation_t` natural case
+and asserts it recovers the raw DB column. The existing `interpolate_*` unit tests pass
+despite the original bug, so they do **not** cover the row-vs-column axis the pack/Horner
+imposes.
+
+---
+
+## Noise-measurement caveat (separate, still-open issue)
+
+The fix is confirmed by **value-level** checks (`got==want`, all `0/0` mismatch counts,
+`plaintext-horner == decrypt(selected)`), none of which depend on `glwe_noise`. The
+**reported noise number is not trustworthy** and should be investigated independently:
+
+- For the *same* `selected` ciphertext, two measurements disagree by ~5 bits:
+  - **self-noise** (decrypt → round to nearest mod-`p` → residual): `max ≈ -20.8`;
+  - **`client.noise(selected, true_payload)`** (→ `Module::glwe_noise`): `max ≈ -15.9`.
+  Since `got == want`, both reference the true value and **must** agree — they don't.
+- **Recursion regressed in the *reported* noise only**: the first recursion run (before
+  any of these changes) reported `log2(std) ≈ -28`; it now reports `≈ -17`, although the
+  fix does not touch recursion's compute path and recursion still decrypts `OK`.
+
+Both point at **`glwe_noise` in `poulpy-core`** (`poulpy-core/src/default/noise/glwe.rs`)
+— the same function that contained a stray, non-compiling debug
+`println!("res_backend …")` (removed to unblock the build). That function appears to have
+been edited while instrumented; the noise computation there is the prime suspect, not the
+FHE result. **Action:** review `glwe_noise` against a known-good reference before trusting
+any `log2(noise)` figure (the per-stage *self-noise* proxy is also only valid while the
+noise is well below half the message-lattice spacing, so it under-reports once Horner
+grows the noise).
 
 ---
 

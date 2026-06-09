@@ -36,6 +36,59 @@ use crate::{
     payload::Payload,
 };
 
+/// Cache-block size for the interpolation load/store transpose.
+const INTERP_TILE: usize = 64;
+
+/// Transposed load: `working` column `c` ← matrix column `c` taken over the row
+/// (`R`) axis, so `monomial_interpolate` rotates `R` — the axis the packed GLWE /
+/// Horner reconstruct along. Cache-blocked so the strided working writes stay
+/// L1-resident per tile (the `CoeffMatrix` is read contiguously row by row).
+fn load_matrix_transposed(working: &mut VecZnx<Vec<u8>>, src: &CoeffMatrix, n: usize) {
+    let mut r0 = 0;
+    while r0 < n {
+        let r1 = (r0 + INTERP_TILE).min(n);
+        let mut c0 = 0;
+        while c0 < n {
+            let c1 = (c0 + INTERP_TILE).min(n);
+            for r in r0..r1 {
+                let src_row = src.row(r);
+                for c in c0..c1 {
+                    working.at_mut(c, 0)[r] = src_row[c] as i64;
+                }
+            }
+            c0 = c1;
+        }
+        r0 = r1;
+    }
+}
+
+/// Transposed store (inverse of [`load_matrix_transposed`]): `dst.row(R)[c] =
+/// working_c[R]·inv_t`, cache-blocked.
+fn store_matrix_transposed(
+    dst: &mut CoeffMatrix,
+    working: &VecZnx<Vec<u8>>,
+    encoder: &ModPEncoder,
+    inv_t: i64,
+    n: usize,
+) {
+    let mut r0 = 0;
+    while r0 < n {
+        let r1 = (r0 + INTERP_TILE).min(n);
+        let mut c0 = 0;
+        while c0 < n {
+            let c1 = (c0 + INTERP_TILE).min(n);
+            for r in r0..r1 {
+                let d = dst.row_mut(r);
+                for c in c0..c1 {
+                    d[c] = encoder.mul(working.at(c, 0)[r], inv_t) as i16;
+                }
+            }
+            c0 = c1;
+        }
+        r0 = r1;
+    }
+}
+
 /// Full-packing keys used by the interpolation collapse.
 pub struct InterpolationKeys<BE: Backend> {
     key_g: GLWEAutomorphismKeyCompressed<BE::OwnedBuf>,
@@ -185,16 +238,11 @@ impl Interpolation {
             (0..t).map(|_| module.vec_znx_alloc(n, 1)).collect();
 
         for bc in 0..kb {
-            // Load the nb_matrices evaluation panels; zero-pad up to interpolation_t.
+            // Load each panel TRANSPOSED so the IDFT rotates the `R` (packed) axis;
+            // zero-pad up to `t`.
             for (m, w) in working.iter_mut().enumerate() {
                 if m < nb {
-                    let src = &db.matrices()[m * kb + bc];
-                    for col in 0..n {
-                        let w_col = w.at_mut(col, 0);
-                        for (wv, &sv) in w_col.iter_mut().zip(src.row(col).iter()) {
-                            *wv = sv as i64;
-                        }
-                    }
+                    load_matrix_transposed(w, &db.matrices()[m * kb + bc], n);
                 } else {
                     for col in 0..n {
                         w.at_mut(col, 0).fill(0);
@@ -207,20 +255,15 @@ impl Interpolation {
                 module.monomial_interpolate(&mut working, col, &mut scratch.borrow());
             }
 
-            // Scale by inv_t and write each panel back (db for j < nb, else tail).
+            // Scale by inv_t and write each panel back TRANSPOSED (db for j < nb,
+            // else tail).
             for (j, w) in working.iter().enumerate() {
                 let dst = if j < nb {
                     &mut db.matrices_mut()[j * kb + bc]
                 } else {
                     &mut tail[(j - nb) * kb + bc]
                 };
-                for col in 0..n {
-                    let s = w.at(col, 0);
-                    let d = dst.row_mut(col);
-                    for (out, &raw) in d.iter_mut().zip(s.iter()) {
-                        *out = encoder.mul(raw, inv_t) as i16;
-                    }
-                }
+                store_matrix_transposed(dst, w, encoder, inv_t, n);
             }
         }
 
@@ -264,15 +307,10 @@ impl Interpolation {
         let mut working: Vec<VecZnx<Vec<u8>>> =
             (0..t).map(|_| module.vec_znx_alloc(n, 1)).collect();
         for bc in 0..kb {
+            // Load each matrix TRANSPOSED so the IDFT rotates the `R` (packed) axis.
             for (m, w) in working.iter_mut().enumerate() {
                 if m < nb {
-                    let src = &plain.matrices()[m * kb + bc];
-                    for col in 0..n {
-                        let w_col = w.at_mut(col, 0);
-                        for (wv, &sv) in w_col.iter_mut().zip(src.row(col).iter()) {
-                            *wv = sv as i64;
-                        }
-                    }
+                    load_matrix_transposed(w, &plain.matrices()[m * kb + bc], n);
                 } else {
                     for col in 0..n {
                         w.at_mut(col, 0).fill(0);
@@ -282,15 +320,10 @@ impl Interpolation {
             for col in 0..n {
                 module.monomial_interpolate(&mut working, col, &mut scratch.borrow());
             }
+            // Store TRANSPOSED back.
             for (j, w) in working.iter().enumerate() {
                 let dst = &mut matrix.matrices_mut()[j * kb + bc];
-                for col in 0..n {
-                    let s = w.at(col, 0);
-                    let d = dst.row_mut(col);
-                    for (out, &raw) in d.iter_mut().zip(s.iter()) {
-                        *out = encoder.mul(raw, inv_t) as i16;
-                    }
-                }
+                store_matrix_transposed(dst, w, encoder, inv_t, n);
             }
         }
     }
