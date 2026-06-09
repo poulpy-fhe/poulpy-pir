@@ -11,10 +11,6 @@ poulpy-hal = { path = "../poulpy/poulpy-hal" }
 poulpy-cpu-ref = { path = "../poulpy/poulpy-cpu-ref", features = ["enable-core"] }
 poulpy-cpu-avx = { path = "../poulpy/poulpy-cpu-avx", features = ["enable-avx"] }
 
-[dev-dependencies]
-faer = { version = "0.24", default-features = false, features = ["std"] }
-matrixmultiply = "0.3"
-
 [[bench]]
 name = "packing"
 path = "benches/packing/main.rs"

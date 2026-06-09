@@ -4,28 +4,26 @@
 use std::time::{Duration, Instant};
 
 use poulpy_core::layouts::{
-    GLWE, GLWECompressed, GLWEInfos, GLWEToBackendMut, GLWEToBackendRef, LWEMatrix,
-    LWEMatrixToBackendMut, ModuleCoreAlloc,
+    GLWE, GLWECompressed, GLWEInfos, GLWEToBackendMut, GLWEToBackendRef, ModuleCoreAlloc,
 };
 use poulpy_hal::{
     api::{ScratchOwnedAlloc, ScratchOwnedBorrow},
     layouts::{
         Backend, HostDataMut, HostDataRef, Module, ScratchOwned, VecZnx, VecZnxToBackendMut,
-        VecZnxToBackendRef, ZnxView, ZnxViewMut,
+        VecZnxToBackendRef,
     },
 };
 
 use crate::{
     client::Response,
-    database::PayloadAddress,
     interpolation::{InterpolationQuery, InterpolationResponse},
     packing::Packing,
     parameters::Parameters,
     payload::Payload,
     server::{
-        OnlineTimings, Query, Server, ServerCollapse, ServerPrecomputation,
+        OnlineTimings, Server, ServerCollapse, ServerPrecomputation,
         api::InterpolationServerModule,
-        common::{PreparedF64, full_torus_f64_body_product, mask_product_to_pack},
+        common::{PreparedF64, full_torus_f64_body_product},
     },
 };
 
@@ -37,7 +35,6 @@ where
     ScratchOwned<BE>: ScratchOwnedAlloc<BE> + ScratchOwnedBorrow<BE>,
     VecZnx<Vec<u8>>:
         VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE> + poulpy_hal::layouts::ZnxInfos,
-    LWEMatrix<Vec<u8>>: LWEMatrixToBackendMut<BE>,
     GLWE<Vec<u8>>: GLWEToBackendMut<BE> + GLWEToBackendRef<BE> + GLWEInfos,
     for<'b> BE::BufRef<'b>: HostDataRef,
     for<'b> BE::BufMut<'b>: HostDataMut,
@@ -120,73 +117,9 @@ where
         );
         timings.add_reduce("interpolation.reduce", t.elapsed());
         (
-            Response::Interpolation(InterpolationResponse::new(selected, packed_coeffs)),
+            Response::Interpolation(InterpolationResponse::new(selected)),
             timings,
         )
-    }
-
-    /// DEBUG: recompute the per-panel first step `(U·A, U·b)` (the shared
-    /// `U·(A,b)` product, *before* packing) and return each as an `LWEMatrix`
-    /// together with the plaintext interpolated-`U` column it is supposed to
-    /// decrypt to. The query one-hot selects column `col_in_block` of block
-    /// `block_col`, so the expected output of panel `j` is column `col_in_block`
-    /// of the interpolated matrix `state.matrix[j·kb + block_col]` — exactly "one
-    /// column of one of the matrices". The client decrypts these with `sk` and
-    /// compares values (see `Client::debug_decrypt_first_step`).
-    pub fn debug_interpolation_first_step(
-        &self,
-        query: &Query<BE>,
-        address: &PayloadAddress,
-    ) -> Vec<(LWEMatrix<Vec<u8>>, Vec<i64>)> {
-        let Query::Interpolation(query) = query else {
-            return Vec::new();
-        };
-        let module = self.params.module();
-        let n = self.params.n();
-        let kb = self.layout.block_cols(n);
-        let block_col = address.block_col(n);
-        let col_in_block = address.col_in_block(n);
-
-        let ServerCollapse::Interpolation(state) = &self.collapse else {
-            panic!("interpolation first-step debug requested for non-interpolation server");
-        };
-        let ServerPrecomputation::Interpolation(precomputation) = &self.precomputation else {
-            panic!("interpolation first-step debug requested for non-interpolation server");
-        };
-        let panels = state.interpolation.num_panels();
-        let lwe_infos = self.params.lwe_matrix_infos();
-        let body_size = self.params.size_at(self.params.base2k());
-
-        let mut out = Vec::with_capacity(panels);
-        for panel in 0..panels {
-            // U·A (mask), summed over block-columns — the offline mask product.
-            let mut res = mask_product_to_pack(
-                module,
-                &self.params,
-                &lwe_infos,
-                &precomputation.prepared_u[panel],
-                &precomputation.masks,
-            );
-            // U·b (body) — the online body product — copied into the LWE body.
-            let mut body = module.vec_znx_alloc(1, body_size);
-            full_torus_f64_body_product::<BE>(
-                &mut body,
-                self.params.base2k(),
-                &precomputation.prepared_u[panel],
-                &query.common.blocks,
-                self.params.matmul_base2k(),
-                self.params.k(),
-            );
-            for limb in 0..body_size {
-                res.body_mut().at_mut(0, limb).copy_from_slice(body.at(0, limb));
-            }
-
-            // Expected: column `col_in_block` of interpolated U panel at `block_col`.
-            let u_mat = &state.matrix.matrices()[panel * kb + block_col];
-            let expected: Vec<i64> = (0..n).map(|r| u_mat.row(r)[col_in_block] as i64).collect();
-            out.push((res, expected));
-        }
-        out
     }
 }
 

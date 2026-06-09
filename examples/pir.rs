@@ -25,11 +25,11 @@ use poulpy_pir::{
 /// Backend used by this driver.
 type BE = FFT64Avx;
 
-const DB_ROWS: usize = 16384;
-const DB_COLS: usize = 32768;
+const DB_ROWS: usize = 4096;
+const DB_COLS: usize = 8192;
 
 fn main() {
-    const ITEM_INDEX: usize = 5_000_000;
+    const ITEM_INDEX: usize = 1_000_000;
 
     if true {
         run(
@@ -123,140 +123,6 @@ where
     let noise = client.noise(&response, &state, &expected_record);
     println!("NOISE log2(max)              : {:.3}", noise.max_log2());
     println!("NOISE log2(std)              : {:.3}", noise.std_log2());
-
-    // DEBUG: decrypt the first step U·(A,b) BEFORE packing and check each panel
-    // against the plaintext interpolated-U column it must equal. (0, 0) = correct.
-    let first_steps = server.debug_interpolation_first_step(&query, &selected);
-    if !first_steps.is_empty() {
-        let checks = client.debug_decrypt_first_step(&first_steps, &state);
-        for (panel, (max_err, mismatches)) in checks.iter().enumerate() {
-            println!(
-                "  first_step[{panel}] U·(A,b) max_err / mismatches : {} / {}",
-                max_err, mismatches
-            );
-        }
-        // Same U-column reference, but checked against the PACKED panel values:
-        // splits the value bug between pack (wrong here) and reduce (correct here).
-        let expected_cols: Vec<Vec<i64>> = first_steps.iter().map(|(_, e)| e.clone()).collect();
-        let packed_checks = client.debug_decrypt_packed_values(&response, &expected_cols, &state);
-        for (panel, (max_err, mismatches)) in packed_checks.iter().enumerate() {
-            println!(
-                "  packed[{panel}] value max_err / mismatches    : {} / {}",
-                max_err, mismatches
-            );
-        }
-
-        // PLAINTEXT Horner of the (correct) U columns at root X^exp, compared to the
-        // decrypted `selected`. Match ⇒ the ciphertext Horner is correct (bug is in
-        // root/decode); mismatch ⇒ the GGSW×GLWE Horner itself is wrong.
-        let p = client.params().p();
-        let t_deg = layout.interpolation_t(n);
-        let exp = selected.matrix * (2 * n / t_deg);
-        let center = |x: i64| -> i64 {
-            let mut r = x.rem_euclid(p);
-            if r > p / 2 {
-                r -= p;
-            }
-            r
-        };
-        let mut recon = vec![0i64; n];
-        for (j, col) in expected_cols.iter().enumerate() {
-            let e = (exp * j) % (2 * n);
-            for i in 0..n {
-                let pos = (i + e) % (2 * n);
-                if pos < n {
-                    recon[pos] = center(recon[pos] + col[i]);
-                } else {
-                    recon[pos - n] = center(recon[pos - n] - col[i]);
-                }
-            }
-        }
-        let decoded_selected = client.decrypt_digits(&response, &state);
-        let horner_mismatch = recon
-            .iter()
-            .zip(&decoded_selected)
-            .filter(|(a, b)| a != b)
-            .count();
-        println!(
-            "  plaintext-horner vs decrypt(selected) (exp={exp}) mismatches : {} / {}",
-            horner_mismatch, n
-        );
-        println!(
-            "  recon[off..off+8]   : {:?}",
-            &recon[selected.row_offset..(selected.row_offset + 8).min(n)]
-        );
-        println!(
-            "  selected[off..off+8]: {:?}",
-            &decoded_selected[selected.row_offset..(selected.row_offset + 8).min(n)]
-        );
-
-        // Which interpolation POINT actually reconstructs each raw DB matrix?
-        // Reveals the panel/point ordering (e.g. bit-reversal) mismatch.
-        let kb = layout.block_cols(n);
-        let nb = layout.block_rows(n);
-        let block_col = selected.block_col(n);
-        let col_in_block = selected.col_in_block(n);
-        let raw_cols: Vec<Vec<i64>> = (0..t_deg)
-            .map(|m| {
-                if m < nb {
-                    (0..n)
-                        .map(|r| {
-                            server.database().matrices()[m * kb + block_col].row(r)[col_in_block]
-                                as i64
-                        })
-                        .collect()
-                } else {
-                    vec![0i64; n]
-                }
-            })
-            .collect();
-        for m in 0..t_deg {
-            let e0 = m * (2 * n / t_deg);
-            let mut rec = vec![0i64; n];
-            for (j, col) in expected_cols.iter().enumerate() {
-                let e = (e0 * j) % (2 * n);
-                for i in 0..n {
-                    let pos = (i + e) % (2 * n);
-                    if pos < n {
-                        rec[pos] = center(rec[pos] + col[i]);
-                    } else {
-                        rec[pos - n] = center(rec[pos - n] - col[i]);
-                    }
-                }
-            }
-            let (best_m, best_hits) = (0..t_deg)
-                .map(|mm| {
-                    (
-                        mm,
-                        rec.iter()
-                            .zip(&raw_cols[mm])
-                            .filter(|(a, b)| center(**a - **b) == 0)
-                            .count(),
-                    )
-                })
-                .max_by_key(|x| x.1)
-                .unwrap();
-            println!(
-                "  point m={m} (e0={e0}) best-matches raw matrix {best_m} : {best_hits}/{n}"
-            );
-        }
-    }
-
-    // DEBUG: per-panel self-noise of the packed GLWEs (pre-reduce). Healthy ~ -20;
-    // ~ -1 means the panel is already garbage before the Horner reduce.
-    let packed_noise = client.debug_packed_noise(&response, &state);
-    let n_panels = packed_noise.len().saturating_sub(1);
-    for (idx, (max_log2, std_log2)) in packed_noise.iter().enumerate() {
-        let label = if idx < n_panels {
-            format!("packed[{idx}]")
-        } else {
-            "selected   ".to_string()
-        };
-        println!(
-            "  {label} self-noise log2(max/std) : {:.3} / {:.3}",
-            max_log2, std_log2
-        );
-    }
 
     let want = server.get(item_index); // ground truth from the server's plaintext DB
     println!(" got : {:?} \n want: {:?}", got, want);

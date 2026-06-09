@@ -326,10 +326,13 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Database<BE, P> {
         let (matrix_idx, row_out_base, col_in_block) =
             self.matrix_index_and_column(grid_row, column);
         let block = &self.matrices[matrix_idx];
-        // Recover the canonical `[0, p)` residue: digits are stored as the `i16`
-        // bit pattern of a `Z_p` value (`p <= 2^16`), so reinterpret unsigned.
+        // Digits are stored as the centered `i16` representative of a `Z_p` value.
+        // Return it signed: `as u16` would reduce mod `2^16`, but `p = 2^16 - 1`,
+        // so a negative digit `-k` would come back as `2^16 - k ≡ (1 - k) mod p`
+        // — a +1 error on every negative coefficient. The encoder recenters mod
+        // `p`, so the signed representative is exact.
         (0..len)
-            .map(|j| block.row(row_out_base + row_offset + j)[col_in_block] as u16 as i64)
+            .map(|j| block.row(row_out_base + row_offset + j)[col_in_block] as i64)
             .collect()
     }
 
