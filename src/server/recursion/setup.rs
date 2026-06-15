@@ -43,7 +43,7 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Server<BE, P>
 where
     BE: poulpy_cpu_ref::reference::fft64::reim::ReimArith,
     Module<BE>: RecursionServerModule<BE>,
-    <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static,
+    <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static + Send + Sync,
     ScratchOwned<BE>: ScratchOwnedAlloc<BE> + ScratchOwnedBorrow<BE>,
     VecZnx<Vec<u8>>: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE>,
     LWEMatrix<Vec<u8>>: LWEMatrixToBackendMut<BE>,
@@ -142,6 +142,7 @@ where
             server_seed,
             database,
             scratch,
+            scratch_pool: Vec::new(),
             collapse: ServerCollapse::Recursion(RecursionState {
                 src_infos,
                 key0_mask,

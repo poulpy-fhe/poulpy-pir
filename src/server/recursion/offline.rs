@@ -9,11 +9,12 @@ use poulpy_core::{
         Degree, GLWE, LWEInfos, LWEMatrix, LWEMatrixLayout, LWEMatrixToBackendMut, ModuleCoreAlloc,
     },
 };
+use poulpy_core::layouts::GLWEAutomorphismKeyCompressed;
 use poulpy_hal::{
     api::{ScratchOwnedAlloc, ScratchOwnedBorrow, VecZnxDftAutomorphismPlan},
     layouts::{
-        Backend, HostDataMut, HostDataRef, Module, ScratchOwned, VecZnx, VecZnxToBackendMut,
-        VecZnxToBackendRef, ZnxView, ZnxViewMut, ZnxZero,
+        Backend, HostDataMut, HostDataRef, Module, ScratchArena, ScratchOwned, VecZnx,
+        VecZnxToBackendMut, VecZnxToBackendRef, ZnxView, ZnxViewMut, ZnxZero,
     },
 };
 
@@ -23,11 +24,12 @@ use crate::{
         Packing, PackingMaskAggregation, PackingPrecomputations,
         recursion::{modulus_switch_to_digits, qtilde_glwe_layout},
     },
+    parallel::{assign_panels, num_threads, scoped_workers},
     payload::Payload,
     server::{
         OfflineTimings, Server, ServerCollapse, ServerPrecomputation,
         api::RecursionServerModule,
-        common::{PreparedF64, copy_lwe_matrix_mask_rows, mask_product_to_pack},
+        common::{PreparedF64, QueryMask, copy_lwe_matrix_mask_rows, mask_product_to_pack},
     },
 };
 
@@ -38,7 +40,7 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Server<BE, P>
 where
     BE: poulpy_cpu_ref::reference::fft64::reim::ReimArith,
     Module<BE>: RecursionServerModule<BE>,
-    <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static,
+    <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static + Send + Sync,
     ScratchOwned<BE>: ScratchOwnedAlloc<BE> + ScratchOwnedBorrow<BE>,
     VecZnx<Vec<u8>>: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE>,
     LWEMatrix<Vec<u8>>: LWEMatrixToBackendMut<BE>,
@@ -65,6 +67,21 @@ where
             resp1_prep,
             resp1_precompute,
         });
+
+        // Warm the online per-worker scratch pool (plan M2′) so per-query packs
+        // reuse it instead of allocating.
+        let bytes = self.scratch_for_pack();
+        let nthreads = num_threads(usize::MAX);
+        eprintln!(
+            "  [mem] scratch_for_pack = {:.1} MiB, pool = {} entries = {:.1} MiB",
+            bytes as f64 / (1 << 20) as f64,
+            nthreads,
+            (bytes * nthreads) as f64 / (1 << 20) as f64
+        );
+        while self.scratch_pool.len() < nthreads {
+            self.scratch_pool.push(ScratchOwned::<BE>::alloc(bytes));
+        }
+
         timings
     }
 
@@ -117,69 +134,97 @@ where
             ..full_pack_infos
         };
         let rows_per_group = self.database.rows_per_physical_group();
-        let mut prepare_db = Duration::default();
+        let physical_rows = self.database.physical_rows();
+        let torus_bits = self.params.k();
+
+        // Phase 1 (cheap, sequential): decode the DB into per-row-group `f64`
+        // panels. Done up front so the parallel region below captures the owned
+        // `db_prep` (no `&self.database`, hence no `P: Sync`).
+        let started = Instant::now();
+        let db_prep: Vec<Vec<PreparedF64>> = (0..physical_rows)
+            .map(|row_group| {
+                (0..self.database.column_blocks())
+                    .map(|block| PreparedF64::new(self.database.physical_block(row_group, block)))
+                    .collect()
+            })
+            .collect();
+        let prepare_db = started.elapsed();
+
+        // Phase 2 (parallel over row groups): `D·A0` mask product + per-row
+        // partial mask-prep / pack-precompute. Each row group is independent
+        // (own scratch, sequential per-batch ops ⇒ bit-identical).
+        let bytes = self.scratch_for_pack();
+        let nthreads = num_threads(physical_rows);
+        // Spare cores tile each row group's mask-product contraction (balanced
+        // nesting with the row-group parallelism, like the interpolation path).
+        let mask_threads = (num_threads(usize::MAX) / nthreads).max(1);
+        let work = assign_panels(physical_rows, 1, nthreads);
+        type GroupOut<BE> = (Option<Vec<PackingPrecomputations<BE>>>, [Duration; 3]);
+        let mut outputs: Vec<GroupOut<BE>> =
+            (0..physical_rows).map(|_| (None, [Duration::default(); 3])).collect();
+
+        let region = Instant::now();
+        {
+            let db_prep = &db_prep;
+            let full_pack_infos = &full_pack_infos;
+            let partial_res_infos = &partial_res_infos;
+            let mut slabs: Vec<&mut [GroupOut<BE>]> = Vec::with_capacity(work.len());
+            let mut rest = outputs.as_mut_slice();
+            for group in &work {
+                let (head, tail) = rest.split_at_mut(group.len());
+                slabs.push(head);
+                rest = tail;
+            }
+            scoped_workers::<BE, GroupOut<BE>, _>(slabs, &work, bytes, |slab, group, sc| {
+                for (slot, w) in slab.iter_mut().zip(group.iter()) {
+                    let (precomputes, d) = compute_l1_row_group(
+                        module,
+                        w.panel,
+                        rows_per_group,
+                        shape.t,
+                        shape.gamma0,
+                        shape.base2k,
+                        shape.baby_size,
+                        torus_bits,
+                        mask_threads,
+                        key0_stride,
+                        full_pack_infos,
+                        partial_res_infos,
+                        shape.size,
+                        &db_prep[w.panel],
+                        q0_masks,
+                        key0_mask_source,
+                        &mut sc.borrow(),
+                    );
+                    *slot = (Some(precomputes), d);
+                }
+            });
+        }
+        let region_wall = region.elapsed();
+
         let mut mask_product = Duration::default();
         let mut mask_prep = Duration::default();
         let mut pack_precompute = Duration::default();
-        let mut db_prep = Vec::with_capacity(self.database.physical_rows());
-        let mut l1_precompute = Vec::with_capacity(shape.t);
-        for row_group in 0..self.database.physical_rows() {
-            let started = Instant::now();
-            let row_prep: Vec<PreparedF64> = (0..self.database.column_blocks())
-                .map(|block| PreparedF64::new(self.database.physical_block(row_group, block)))
-                .collect();
-            prepare_db += started.elapsed();
-
-            let started = Instant::now();
-            let full_res_mask =
-                mask_product_to_pack(module, &self.params, &full_pack_infos, &row_prep, q0_masks);
-            mask_product += started.elapsed();
-
-            db_prep.push(row_prep);
-            for local in 0..rows_per_group {
-                let batch = row_group * rows_per_group + local;
-                if batch >= shape.t {
-                    break;
-                }
-                let mut res_mask = module.lwe_matrix_alloc_from_infos(&partial_res_infos);
-                copy_lwe_matrix_mask_rows(
-                    &mut res_mask,
-                    0,
-                    &full_res_mask,
-                    local * shape.gamma0,
-                    shape.gamma0,
-                );
-
-                let mut aggregate = module.vec_znx_alloc(shape.gamma0, shape.size);
-                let started = Instant::now();
-                module.packing_partial_mask_preprocessing(
-                    &mut aggregate,
-                    shape.base2k,
-                    shape.gamma0,
-                    res_mask.mask(),
-                    &mut self.scratch.borrow(),
-                );
-                mask_prep += started.elapsed();
-
-                let mut precompute = module.pack_partial_precompute_alloc(
-                    shape.gamma0 - 1,
-                    shape.size,
-                    shape.base2k,
-                    shape.baby_size,
-                    key0_stride,
-                );
-                let started = Instant::now();
-                module.pack_partial_precompute(
-                    &mut precompute,
-                    &aggregate,
-                    key0_mask_source,
-                    &mut self.scratch.borrow(),
-                );
-                pack_precompute += started.elapsed();
-
-                l1_precompute.push(precompute);
+        for (_, d) in &outputs {
+            mask_product += d[0];
+            mask_prep += d[1];
+            pack_precompute += d[2];
+        }
+        if nthreads > 1 {
+            let cpu = mask_product + mask_prep + pack_precompute;
+            if !cpu.is_zero() {
+                let scale = region_wall.as_secs_f64() / cpu.as_secs_f64();
+                mask_product = mask_product.mul_f64(scale);
+                mask_prep = mask_prep.mul_f64(scale);
+                pack_precompute = pack_precompute.mul_f64(scale);
             }
         }
+
+        let mut l1_precompute = Vec::with_capacity(shape.t);
+        for (slot, _) in outputs {
+            l1_precompute.extend(slot.unwrap());
+        }
+
         timings.add_prepare_u("recursion.l1.prepare_db", prepare_db);
         timings.add_ua_mask("recursion.l1.mask_product", mask_product);
         timings.add_mask_prep("recursion.l1.mask_prep", mask_prep);
@@ -274,4 +319,93 @@ where
         }
         out
     }
+}
+
+/// One level-1 row group's mask-side precompute: the full `D·A0` mask product,
+/// then per local row the partial mask-prep / pack-precompute. Pure w.r.t. shared
+/// state (own scratch, sequential per-batch ops ⇒ bit-identical), so it runs one
+/// row group per worker thread. Returns the row group's precomputes (in `local`
+/// order) and `[mask_product, mask_prep, pack_precompute]` sub-timings.
+#[allow(clippy::too_many_arguments)]
+fn compute_l1_row_group<BE>(
+    module: &Module<BE>,
+    row_group: usize,
+    rows_per_group: usize,
+    t: usize,
+    gamma0: usize,
+    base2k: usize,
+    baby_size: usize,
+    torus_bits: usize,
+    mask_threads: usize,
+    key0_stride: usize,
+    full_pack_infos: &LWEMatrixLayout,
+    partial_res_infos: &LWEMatrixLayout,
+    size: usize,
+    row_prep: &[PreparedF64],
+    q0_masks: &[QueryMask],
+    key0_mask_source: &GLWEAutomorphismKeyCompressed<BE::OwnedBuf>,
+    scratch: &mut ScratchArena<'_, BE>,
+) -> (Vec<PackingPrecomputations<BE>>, [Duration; 3])
+where
+    BE: Backend<OwnedBuf = Vec<u8>> + poulpy_cpu_ref::reference::fft64::reim::ReimArith,
+    Module<BE>: RecursionServerModule<BE> + ModuleCoreAlloc<OwnedBuf = Vec<u8>>,
+    VecZnx<Vec<u8>>: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE>,
+    LWEMatrix<Vec<u8>>: LWEMatrixToBackendMut<BE>,
+    for<'b> BE::BufRef<'b>: HostDataRef,
+    for<'b> BE::BufMut<'b>: HostDataMut,
+{
+    let started = Instant::now();
+    let full_res_mask = mask_product_to_pack(
+        module,
+        full_pack_infos,
+        row_prep,
+        q0_masks,
+        torus_bits,
+        mask_threads,
+    );
+    let d_mask_product = started.elapsed();
+
+    let mut precomputes: Vec<PackingPrecomputations<BE>> = Vec::with_capacity(rows_per_group);
+    let mut d_mask_prep = Duration::default();
+    let mut d_pack_precompute = Duration::default();
+    for local in 0..rows_per_group {
+        let batch = row_group * rows_per_group + local;
+        if batch >= t {
+            break;
+        }
+        let mut res_mask = module.lwe_matrix_alloc_from_infos(partial_res_infos);
+        copy_lwe_matrix_mask_rows(&mut res_mask, 0, &full_res_mask, local * gamma0, gamma0);
+
+        let mut aggregate = module.vec_znx_alloc(gamma0, size);
+        let started = Instant::now();
+        if mask_threads > 1 {
+            module.packing_partial_mask_preprocessing_threaded(
+                &mut aggregate,
+                base2k,
+                gamma0,
+                res_mask.mask(),
+                mask_threads,
+                scratch,
+            );
+        } else {
+            module.packing_partial_mask_preprocessing(
+                &mut aggregate,
+                base2k,
+                gamma0,
+                res_mask.mask(),
+                scratch,
+            );
+        }
+        d_mask_prep += started.elapsed();
+
+        let mut precompute =
+            module.pack_partial_precompute_alloc(gamma0 - 1, size, base2k, baby_size, key0_stride);
+        let started = Instant::now();
+        module.pack_partial_precompute(&mut precompute, &aggregate, key0_mask_source, scratch);
+        d_pack_precompute += started.elapsed();
+
+        precomputes.push(precompute);
+    }
+
+    (precomputes, [d_mask_product, d_mask_prep, d_pack_precompute])
 }

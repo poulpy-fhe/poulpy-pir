@@ -4,6 +4,7 @@
 //! packing module files. This file only contains the reusable default
 //! implementation they call.
 
+use poulpy_core::layouts::ModuleCoreAlloc;
 use poulpy_hal::{
     api::{
         ScratchArenaTakeBasic, VecZnxAddAssignBackend, VecZnxAutomorphismRotateBackend,
@@ -12,7 +13,7 @@ use poulpy_hal::{
         VecZnxTransposeBackend, VecZnxZeroBackend,
     },
     layouts::{
-        Backend, GaloisElement, Module, ScratchArena, VecZnx, VecZnxBackendMut,
+        Backend, GaloisElement, Module, ScratchArena, VecZnx, VecZnxBackendMut, VecZnxBackendRef,
         VecZnxReborrowBackendRef, VecZnxToBackendMut, VecZnxToBackendRef, ZnxInfos,
     },
 };
@@ -321,6 +322,230 @@ fn packing_mask_preprocessing_work<BE, R, A>(
     }
 }
 
+/// Processes one `h = galois_element(j)`: streams the `n` leaves into the two
+/// binary trees and emits the `τ_h` / `τ_{-h}` aggregate columns `col_a`/`col_b`
+/// of `dst`. Identical to one iteration of the sequential `_work` outer loop,
+/// extracted so it can run on a worker thread with its own buffers.
+#[allow(clippy::too_many_arguments)]
+fn process_h_full<BE, M>(
+    module: &M,
+    t_ref: &VecZnxBackendRef<'_, BE>,
+    h: i64,
+    n: usize,
+    shared: &mut VecZnxBackendMut<'_, BE>,
+    stage_a: &mut VecZnxBackendMut<'_, BE>,
+    tree_a: &mut VecZnxBackendMut<'_, BE>,
+    tree_b: &mut VecZnxBackendMut<'_, BE>,
+    occupied_a: &mut [bool],
+    occupied_b: &mut [bool],
+    dst: &mut VecZnxBackendMut<'_, BE>,
+    col_a: usize,
+    col_b: usize,
+) where
+    BE: Backend,
+    M: VecZnxAutomorphismRotateBackend<BE> + VecZnxAddAssignBackend<BE> + VecZnxCopyBackend<BE>,
+{
+    occupied_a.iter_mut().for_each(|x| *x = false);
+    occupied_b.iter_mut().for_each(|x| *x = false);
+    for k in 0..n {
+        module.vec_znx_automorphism_rotate_backend(h, k as i64, shared, 0, t_ref, k);
+        module.vec_znx_automorphism_rotate_backend(-h, k as i64, stage_a, 0, t_ref, k);
+        binary_tree_step(module, stage_a, tree_a, occupied_a, dst, col_a);
+        binary_tree_step(module, shared, tree_b, occupied_b, dst, col_b);
+    }
+}
+
+/// Threaded variant of [`packing_mask_preprocessing_work`]: the `n/2`-iteration
+/// outer loop over `h_list` is embarrassingly parallel (each `h` writes disjoint
+/// aggregate columns `col_a = j`, `col_b = j + n/2`, and the inner ops take no
+/// scratch). The `j` range is split into `intra_threads` contiguous chunks; each
+/// worker owns its tree/staging buffers and a local result panel, then the panels
+/// are merged into `dst`. Bit-identical to the sequential `_work` (no f64 reorder;
+/// the per-`h` arithmetic is independent and unchanged).
+fn packing_mask_preprocessing_work_threaded<BE, R, A>(
+    module: &Module<BE>,
+    dst: &mut R,
+    base2k: usize,
+    a: &A,
+    intra_threads: usize,
+    scratch: &mut ScratchArena<'_, BE>,
+) where
+    BE: Backend<OwnedBuf = Vec<u8>>,
+    Module<BE>: VecZnxCopyBackend<BE>
+        + VecZnxTransposeBackend<BE>
+        + VecZnxAutomorphismRotateBackend<BE>
+        + VecZnxAddAssignBackend<BE>
+        + VecZnxRshAssignBackend<BE>
+        + GaloisElement
+        + ModuleCoreAlloc<OwnedBuf = Vec<u8>>,
+    R: VecZnxToBackendMut<BE> + ZnxInfos,
+    A: VecZnxToBackendRef<BE> + ZnxInfos,
+    VecZnx<Vec<u8>>: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE>,
+{
+    let n = module.n();
+    let n_half = n >> 1;
+    let log_n = n.trailing_zeros() as usize;
+    let size = dst.size();
+
+    assert_eq!(dst.n(), n, "working destination degree mismatch");
+    assert_eq!(dst.cols(), n, "working destination must have d columns");
+    assert_eq!(dst.size(), a.size(), "working destination size mismatch");
+    assert_eq!(a.n(), n, "working input degree mismatch");
+    assert_eq!(a.cols(), n, "working input must have d columns");
+
+    let h_list: Vec<i64> = (0..n_half).map(|i| module.galois_element(i as i64)).collect();
+    let nt = intra_threads.clamp(1, n_half);
+
+    // Owned (shareable) transposed + `d⁻¹`-normalized input; read-only by workers.
+    let mut transposed = module.vec_znx_alloc(n, size);
+    {
+        let a_ref = a.to_backend_ref();
+        let mut t_mut = transposed.to_backend_mut();
+        module.vec_znx_transpose_backend(&mut t_mut, &a_ref);
+    }
+    {
+        let mut t_mut = transposed.to_backend_mut();
+        for col in 0..n {
+            module.vec_znx_rsh_assign_backend(base2k, log_n, &mut t_mut, col, &mut scratch.borrow());
+        }
+    }
+
+    // Contiguous `j` chunks, one per worker.
+    let base = n_half / nt;
+    let rem = n_half % nt;
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(nt);
+    let mut start = 0;
+    for i in 0..nt {
+        let len = base + usize::from(i < rem);
+        ranges.push(start..start + len);
+        start += len;
+    }
+
+    let h_list = &h_list;
+    let transposed_ref = &transposed;
+    let locals: Vec<(std::ops::Range<usize>, VecZnx<Vec<u8>>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = ranges
+            .into_iter()
+            .map(|range| {
+                let r = range.clone();
+                let handle = scope.spawn(move || {
+                    let len = range.len();
+                    let mut local_dst = module.vec_znx_alloc(2 * len.max(1), size);
+                    let mut shared = module.vec_znx_alloc(1, size);
+                    let mut stage_a = module.vec_znx_alloc(1, size);
+                    let mut tree_a = module.vec_znx_alloc(log_n, size);
+                    let mut tree_b = module.vec_znx_alloc(log_n, size);
+                    let mut occupied_a = vec![false; log_n];
+                    let mut occupied_b = vec![false; log_n];
+                    {
+                        let t_ref = transposed_ref.to_backend_ref();
+                        let mut local_dst_mut = local_dst.to_backend_mut();
+                        let mut shared_mut = shared.to_backend_mut();
+                        let mut stage_a_mut = stage_a.to_backend_mut();
+                        let mut tree_a_mut = tree_a.to_backend_mut();
+                        let mut tree_b_mut = tree_b.to_backend_mut();
+                        for (jj, j) in range.enumerate() {
+                            process_h_full(
+                                module,
+                                &t_ref,
+                                h_list[j],
+                                n,
+                                &mut shared_mut,
+                                &mut stage_a_mut,
+                                &mut tree_a_mut,
+                                &mut tree_b_mut,
+                                &mut occupied_a,
+                                &mut occupied_b,
+                                &mut local_dst_mut,
+                                2 * jj,
+                                2 * jj + 1,
+                            );
+                        }
+                    }
+                    local_dst
+                });
+                (r, handle)
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|(range, h)| (range, h.join().expect("mask-prep worker panicked")))
+            .collect()
+    });
+
+    // Merge each worker's local panel into the disjoint `dst` columns.
+    let mut dst_mut = dst.to_backend_mut();
+    for (range, local) in &locals {
+        let local_ref = local.to_backend_ref();
+        for (jj, j) in range.clone().enumerate() {
+            module.vec_znx_copy_backend(&mut dst_mut, j, &local_ref, 2 * jj);
+            module.vec_znx_copy_backend(&mut dst_mut, j + n_half, &local_ref, 2 * jj + 1);
+        }
+    }
+}
+
+/// Threaded entry point for full packing-mask aggregation: same as
+/// [`packing_mask_preprocessing_default`] but the work loop runs across
+/// `intra_threads` threads. Used by the offline driver to fill spare cores when
+/// the panel count under-feeds the machine.
+pub(crate) fn packing_mask_preprocessing_threaded<BE, R, A>(
+    module: &Module<BE>,
+    dst: &mut R,
+    base2k: usize,
+    a: &A,
+    intra_threads: usize,
+    scratch: &mut ScratchArena<'_, BE>,
+) where
+    BE: Backend<OwnedBuf = Vec<u8>>,
+    Module<BE>: VecZnxCopyBackend<BE>
+        + VecZnxTransposeBackend<BE>
+        + VecZnxAutomorphismRotateBackend<BE>
+        + VecZnxAddAssignBackend<BE>
+        + VecZnxNormalize<BE>
+        + VecZnxRshAssignBackend<BE>
+        + GaloisElement
+        + ModuleCoreAlloc<OwnedBuf = Vec<u8>>,
+    R: VecZnxToBackendMut<BE> + ZnxInfos,
+    A: VecZnxToBackendRef<BE> + ZnxInfos,
+    VecZnx<Vec<u8>>: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE>,
+{
+    let size = dst.size();
+    let arithmetic_base2k = mask_preprocessing_arithmetic_base2k(base2k);
+    let arithmetic_size = mask_preprocessing_arithmetic_size(size, base2k);
+    let n = module.n();
+    let scratch_local = scratch.borrow();
+    let (mut arithmetic_input, scratch_next) = scratch_local.take_vec_znx_scratch(n, n, arithmetic_size);
+    let (mut arithmetic_dst, mut scratch_next) =
+        scratch_next.take_vec_znx_scratch(n, n, arithmetic_size);
+
+    normalize_mask_preprocessing_input(
+        module,
+        &mut arithmetic_input,
+        arithmetic_base2k,
+        a,
+        base2k,
+        &mut scratch_next.borrow(),
+    );
+
+    packing_mask_preprocessing_work_threaded(
+        module,
+        &mut arithmetic_dst,
+        arithmetic_base2k,
+        &arithmetic_input,
+        intra_threads,
+        &mut scratch_next.borrow(),
+    );
+
+    normalize_mask_preprocessing_output(
+        module,
+        dst,
+        base2k,
+        &arithmetic_dst,
+        arithmetic_base2k,
+        &mut scratch_next.borrow(),
+    );
+}
+
 /// Default scratch estimate for **partial** packing-mask aggregation.
 pub(crate) fn packing_mask_preprocessing_partial_tmp_bytes_default<BE>(
     module: &Module<BE>,
@@ -514,6 +739,213 @@ fn packing_mask_preprocessing_partial_work<BE, R, A>(
             module.vec_znx_add_assign_backend(&mut dst_mut, j, &term_ref, 0);
         }
     }
+}
+
+/// Computes one partial-packing τ_g component `dst[dst_col] = sum_k X^k ·
+/// τ_{-h}(ã[k])`. Identical to one iteration of the sequential partial `_work`
+/// outer loop, extracted so it can run on a worker thread with its own buffers.
+fn process_h_partial<BE, M>(
+    module: &M,
+    t_ref: &VecZnxBackendRef<'_, BE>,
+    h: i64,
+    gamma: usize,
+    term: &mut VecZnxBackendMut<'_, BE>,
+    dst: &mut VecZnxBackendMut<'_, BE>,
+    dst_col: usize,
+) where
+    BE: Backend,
+    M: VecZnxAutomorphismRotateBackend<BE> + VecZnxAddAssignBackend<BE> + VecZnxZeroBackend<BE>,
+{
+    module.vec_znx_zero_backend(dst, dst_col);
+    for k in 0..gamma {
+        module.vec_znx_automorphism_rotate_backend(-h, k as i64, term, 0, t_ref, k);
+        let term_ref = VecZnxReborrowBackendRef::<BE>::reborrow_backend_ref(term);
+        module.vec_znx_add_assign_backend(dst, dst_col, &term_ref, 0);
+    }
+}
+
+/// Threaded variant of [`packing_mask_preprocessing_partial_work`]: the
+/// `γ`-iteration outer loop over `h_list` is embarrassingly parallel (each `h`
+/// writes a disjoint τ_g component column and the inner ops take no scratch). The
+/// `j` range is split into `intra_threads` contiguous chunks; each worker owns its
+/// staging column + a local result panel, then panels are merged into `dst`.
+/// Bit-identical to the sequential `_work`.
+fn packing_mask_preprocessing_partial_work_threaded<BE, R, A>(
+    module: &Module<BE>,
+    dst: &mut R,
+    base2k: usize,
+    gamma: usize,
+    a: &A,
+    intra_threads: usize,
+    scratch: &mut ScratchArena<'_, BE>,
+) where
+    BE: Backend<OwnedBuf = Vec<u8>>,
+    Module<BE>: VecZnxCopyBackend<BE>
+        + VecZnxTransposeBackend<BE>
+        + VecZnxAutomorphismRotateBackend<BE>
+        + VecZnxAddAssignBackend<BE>
+        + VecZnxRshAssignBackend<BE>
+        + VecZnxZeroBackend<BE>
+        + GaloisElement
+        + ModuleCoreAlloc<OwnedBuf = Vec<u8>>,
+    R: VecZnxToBackendMut<BE> + ZnxInfos,
+    A: VecZnxToBackendRef<BE> + ZnxInfos,
+    VecZnx<Vec<u8>>: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE>,
+{
+    let n = module.n();
+    let log_gamma = gamma.trailing_zeros() as usize;
+    let size = dst.size();
+
+    assert_eq!(dst.n(), n, "working destination degree mismatch");
+    assert_eq!(dst.cols(), gamma, "working destination must have γ columns");
+    assert_eq!(dst.size(), a.size(), "working destination size mismatch");
+    assert_eq!(a.n(), gamma, "working input must have γ rows");
+    assert_eq!(a.cols(), n, "working input must have n columns");
+
+    let stride = (n >> 1) / gamma;
+    let h_list: Vec<i64> = (0..gamma)
+        .map(|i| module.galois_element((stride * i) as i64))
+        .collect();
+    let nt = intra_threads.clamp(1, gamma);
+
+    // Owned (shareable) transposed + `γ⁻¹`-normalized input; read-only by workers.
+    let mut transposed = module.vec_znx_alloc(gamma, size);
+    {
+        let a_ref = a.to_backend_ref();
+        let mut t_mut = transposed.to_backend_mut();
+        module.vec_znx_transpose_backend(&mut t_mut, &a_ref);
+    }
+    {
+        let mut t_mut = transposed.to_backend_mut();
+        for col in 0..gamma {
+            module.vec_znx_rsh_assign_backend(base2k, log_gamma, &mut t_mut, col, &mut scratch.borrow());
+        }
+    }
+
+    let base = gamma / nt;
+    let rem = gamma % nt;
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(nt);
+    let mut start = 0;
+    for i in 0..nt {
+        let len = base + usize::from(i < rem);
+        ranges.push(start..start + len);
+        start += len;
+    }
+
+    let h_list = &h_list;
+    let transposed_ref = &transposed;
+    let locals: Vec<(std::ops::Range<usize>, VecZnx<Vec<u8>>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = ranges
+            .into_iter()
+            .map(|range| {
+                let r = range.clone();
+                let handle = scope.spawn(move || {
+                    let len = range.len();
+                    let mut local_dst = module.vec_znx_alloc(len.max(1), size);
+                    let mut term = module.vec_znx_alloc(1, size);
+                    {
+                        let t_ref = transposed_ref.to_backend_ref();
+                        let mut local_dst_mut = local_dst.to_backend_mut();
+                        let mut term_mut = term.to_backend_mut();
+                        for (jj, j) in range.enumerate() {
+                            process_h_partial(
+                                module,
+                                &t_ref,
+                                h_list[j],
+                                gamma,
+                                &mut term_mut,
+                                &mut local_dst_mut,
+                                jj,
+                            );
+                        }
+                    }
+                    local_dst
+                });
+                (r, handle)
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|(range, h)| (range, h.join().expect("partial mask-prep worker panicked")))
+            .collect()
+    });
+
+    // Merge each worker's local panel into the disjoint `dst` columns.
+    let mut dst_mut = dst.to_backend_mut();
+    for (range, local) in &locals {
+        let local_ref = local.to_backend_ref();
+        for (jj, j) in range.clone().enumerate() {
+            module.vec_znx_copy_backend(&mut dst_mut, j, &local_ref, jj);
+        }
+    }
+}
+
+/// Threaded entry point for partial packing-mask aggregation: same as
+/// [`packing_mask_preprocessing_partial_default`] but the `γ`-component work loop
+/// runs across `intra_threads` threads.
+pub(crate) fn packing_mask_preprocessing_partial_threaded<BE, R, A>(
+    module: &Module<BE>,
+    dst: &mut R,
+    base2k: usize,
+    gamma: usize,
+    a: &A,
+    intra_threads: usize,
+    scratch: &mut ScratchArena<'_, BE>,
+) where
+    BE: Backend<OwnedBuf = Vec<u8>>,
+    Module<BE>: VecZnxCopyBackend<BE>
+        + VecZnxTransposeBackend<BE>
+        + VecZnxAutomorphismRotateBackend<BE>
+        + VecZnxAddAssignBackend<BE>
+        + VecZnxNormalize<BE>
+        + VecZnxRshAssignBackend<BE>
+        + VecZnxZeroBackend<BE>
+        + GaloisElement
+        + ModuleCoreAlloc<OwnedBuf = Vec<u8>>,
+    R: VecZnxToBackendMut<BE> + ZnxInfos,
+    A: VecZnxToBackendRef<BE> + ZnxInfos,
+    VecZnx<Vec<u8>>: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE>,
+{
+    let n = module.n();
+    assert!(gamma.is_power_of_two(), "partial packing requires a power-of-two γ");
+    assert!(gamma <= n >> 1, "partial packing requires γ ≤ n/2");
+
+    let size = dst.size();
+    let arithmetic_base2k = mask_preprocessing_arithmetic_base2k(base2k);
+    let arithmetic_size = mask_preprocessing_arithmetic_size(size, base2k);
+    let scratch_local = scratch.borrow();
+    let (mut arithmetic_input, scratch_next) =
+        scratch_local.take_vec_znx_scratch(gamma, n, arithmetic_size);
+    let (mut arithmetic_dst, mut scratch_next) =
+        scratch_next.take_vec_znx_scratch(n, gamma, arithmetic_size);
+
+    normalize_mask_preprocessing_input(
+        module,
+        &mut arithmetic_input,
+        arithmetic_base2k,
+        a,
+        base2k,
+        &mut scratch_next.borrow(),
+    );
+
+    packing_mask_preprocessing_partial_work_threaded(
+        module,
+        &mut arithmetic_dst,
+        arithmetic_base2k,
+        gamma,
+        &arithmetic_input,
+        intra_threads,
+        &mut scratch_next.borrow(),
+    );
+
+    normalize_mask_preprocessing_output(
+        module,
+        dst,
+        base2k,
+        &arithmetic_dst,
+        arithmetic_base2k,
+        &mut scratch_next.borrow(),
+    );
 }
 
 #[inline]

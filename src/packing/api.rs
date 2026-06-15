@@ -43,6 +43,21 @@ pub trait PackingMaskAggregation<BE: Backend> {
         R: VecZnxToBackendMut<BE> + ZnxInfos,
         A: VecZnxToBackendRef<BE> + ZnxInfos;
 
+    /// Like [`PackingMaskAggregation::packing_mask_preprocessing`], but the
+    /// `n/2`-leaf work loop runs across `intra_threads` threads. Bit-identical to
+    /// the sequential path (the per-leaf arithmetic is independent). Implemented
+    /// only for `Vec<u8>`-buffer backends.
+    fn packing_mask_preprocessing_threaded<R, A>(
+        &self,
+        dst: &mut R,
+        base2k: usize,
+        a: &A,
+        intra_threads: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos;
+
     /// Scratch estimate for partial packing-mask aggregation.
     fn pack_partial_mask_preprocessing_tmp_bytes(&self, gamma: usize, size: usize) -> usize;
 
@@ -54,6 +69,21 @@ pub trait PackingMaskAggregation<BE: Backend> {
         base2k: usize,
         gamma: usize,
         a: &A,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos;
+
+    /// Like [`PackingMaskAggregation::packing_partial_mask_preprocessing`], but the
+    /// `γ`-component work loop runs across `intra_threads` threads. Bit-identical
+    /// to the sequential path. Implemented only for `Vec<u8>`-buffer backends.
+    fn packing_partial_mask_preprocessing_threaded<R, A>(
+        &self,
+        dst: &mut R,
+        base2k: usize,
+        gamma: usize,
+        a: &A,
+        intra_threads: usize,
         scratch: &mut ScratchArena<'_, BE>,
     ) where
         R: VecZnxToBackendMut<BE> + ZnxInfos,

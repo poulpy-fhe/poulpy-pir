@@ -273,6 +273,11 @@ pub struct Server<BE: Backend, P: Payload<[u8; 32]>> {
     server_seed: ServerSeed,
     database: Database<BE, P>,
     scratch: ScratchOwned<BE>,
+    /// Persistent per-worker scratch arenas for the parallel online panel loop,
+    /// allocated once (lazily, on first query) and reused — a fresh per-query
+    /// `ScratchOwned::alloc` would fault a large arena in concurrently and swamp
+    /// the memory-bound body product (plan M2′).
+    scratch_pool: Vec<ScratchOwned<BE>>,
     collapse: ServerCollapse<BE, P>,
     precomputation: ServerPrecomputation<BE>,
 }
@@ -282,7 +287,7 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Server<BE, P>
 where
     BE: poulpy_cpu_ref::reference::fft64::reim::ReimArith,
     Module<BE>: InterpolationServerModule<BE> + RecursionServerModule<BE>,
-    <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static,
+    <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static + Send + Sync,
     ScratchOwned<BE>: ScratchOwnedAlloc<BE> + ScratchOwnedBorrow<BE>,
     VecZnx<Vec<u8>>:
         VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE> + poulpy_hal::layouts::ZnxInfos,

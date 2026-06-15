@@ -9,9 +9,15 @@ use poulpy_core::{
     EncryptionLayout, GLWENormalize,
     layouts::{Base2K, Degree, GLWE, GLWELayout, LWEInfos, ModuleCoreAlloc, Rank, TorusPrecision},
 };
-use poulpy_hal::layouts::{Backend, Module, ScratchArena, VecZnx, ZnxViewMut};
+use poulpy_hal::{
+    api::ScratchOwnedBorrow,
+    layouts::{Backend, Module, ScratchArena, ScratchOwned, VecZnx, ZnxViewMut},
+};
 
-use crate::packing::{Packing, PackingKeys, PackingPrecomputations};
+use crate::{
+    packing::{Packing, PackingKeys, PackingPrecomputations},
+    parallel::{assign_panels, num_threads, scoped_workers_pooled},
+};
 
 /// Number of base2k=16 decomposition digits for a `qtilde`-modulus plaintext.
 pub(crate) fn decompose_digits(qtilde_bits: usize) -> usize {
@@ -76,6 +82,7 @@ pub(crate) fn qtilde_glwe_layout(n: Degree, qtilde_bits: usize) -> EncryptionLay
 
 /// Partial-packs `packed_inputs` into RLWEs, then modulus-switches every packed
 /// RLWE to `qtilde` at `base2k = 16`.
+#[allow(dead_code)] // used by recursion tests; superseded by `partial_pack_batch_pooled` in prod
 pub(crate) fn partial_pack_batch<BE>(
     module: &Module<BE>,
     src_infos: &EncryptionLayout<GLWELayout>,
@@ -100,4 +107,60 @@ where
         out.push(switched);
     }
     out
+}
+
+/// Parallel [`partial_pack_batch`]: each input's `pack` + modulus-switch is
+/// independent, so they run across workers, each borrowing a persistent
+/// [`ScratchOwned`] from `pool` (no per-query allocation). Output is written by
+/// index ⇒ bit-identical to the sequential order.
+#[allow(clippy::type_complexity)]
+pub(crate) fn partial_pack_batch_pooled<BE>(
+    module: &Module<BE>,
+    src_infos: &EncryptionLayout<GLWELayout>,
+    qtilde_bits: usize,
+    packed_inputs: &[(&PackingPrecomputations<BE>, &VecZnx<BE::OwnedBuf>)],
+    key: &PackingKeys<BE>,
+    pool: &mut [ScratchOwned<BE>],
+) -> Vec<GLWE<BE::OwnedBuf>>
+where
+    BE: Backend<OwnedBuf = Vec<u8>>,
+    Module<BE>: Packing<BE> + GLWENormalize<BE> + ModuleCoreAlloc<OwnedBuf = Vec<u8>>,
+    ScratchOwned<BE>: ScratchOwnedBorrow<BE>,
+{
+    let count = packed_inputs.len();
+    let qtilde_infos = qtilde_glwe_layout(src_infos.n(), qtilde_bits);
+    let nthreads = num_threads(count).min(pool.len().max(1));
+    let work = assign_panels(count, 1, nthreads);
+
+    let mut outputs: Vec<Option<GLWE<BE::OwnedBuf>>> = (0..count).map(|_| None).collect();
+    {
+        let mut out_slabs: Vec<&mut [Option<GLWE<BE::OwnedBuf>>]> = Vec::with_capacity(work.len());
+        let mut rest = outputs.as_mut_slice();
+        for grp in &work {
+            let (head, tail) = rest.split_at_mut(grp.len());
+            out_slabs.push(head);
+            rest = tail;
+        }
+        let scratch_slabs: Vec<&mut ScratchOwned<BE>> = pool[..work.len()].iter_mut().collect();
+        let qtilde_infos = &qtilde_infos;
+        scoped_workers_pooled::<BE, Option<GLWE<BE::OwnedBuf>>, _>(
+            out_slabs,
+            scratch_slabs,
+            &work,
+            |slab, grp, sc| {
+                for (slot, w) in slab.iter_mut().zip(grp.iter()) {
+                    let (precompute, body) = packed_inputs[w.panel];
+                    let mut packed = module.glwe_alloc_from_infos(src_infos);
+                    module.pack(&mut packed, body, precompute, key, 1, &mut sc.borrow());
+                    let mut switched = module.glwe_alloc_from_infos(qtilde_infos);
+                    modulus_switch_to_digits::<BE>(module, &mut switched, &packed, &mut sc.borrow());
+                    *slot = Some(switched);
+                }
+            },
+        );
+    }
+    outputs
+        .into_iter()
+        .map(|o| o.expect("pack worker did not fill its slot"))
+        .collect()
 }

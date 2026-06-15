@@ -153,8 +153,12 @@ pub struct PackingPrecomputations<BE: Backend> {
     final_mask: VecZnx<BE::OwnedBuf>,
     /// DFT columns derived from `body_vmp_masks` for BSGS baby-step products.
     bsgs_masks: Vec<VecZnxDft<BE::OwnedBuf, BE>>,
-    /// Type-erased giant-step plans used after each baby-step group sum.
-    bsgs_giant_plans: Vec<Box<dyn Any>>,
+    /// Type-erased giant-step plans used after each baby-step group sum. Boxed
+    /// as `Any + Send + Sync` so a `PackingPrecomputations` can be both produced
+    /// on a worker thread (Send) and shared read-only across worker threads
+    /// (Sync) during online packing. The concrete HAL plan types are plain
+    /// `Send + Sync` data.
+    bsgs_giant_plans: Vec<Box<dyn Any + Send + Sync>>,
     /// Number of baby steps per giant-step group.
     bsgs_baby_size: usize,
     /// Base used when normalizing big products back into coefficient buffers.
@@ -999,7 +1003,7 @@ pub(crate) fn sequential_collapse_bsgs_dft_build<BE>(
         + VecZnxDftApply<BE>
         + VecZnxDftAutomorphismPlan<BE>,
     VecZnx<BE::OwnedBuf>: VecZnxToBackendRef<BE>,
-    <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static,
+    <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static + Send + Sync,
 {
     let n = module.n();
     // Full packing: `2 * (n/2 - 1)` key_g steps + a final key_h step. Partial
@@ -1009,7 +1013,7 @@ pub(crate) fn sequential_collapse_bsgs_dft_build<BE>(
 
     let stride = precompute.stride();
     let group_count = precompute.bsgs_group_count();
-    let mut giant_plans: Vec<Box<dyn Any>> = Vec::with_capacity(group_count);
+    let mut giant_plans: Vec<Box<dyn Any + Send + Sync>> = Vec::with_capacity(group_count);
     for group_idx in 0..group_count {
         let giant_alpha = sequential_collapse_bsgs_giant_alpha(
             module,

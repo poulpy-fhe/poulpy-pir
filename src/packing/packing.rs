@@ -49,7 +49,7 @@ pub(crate) fn pack_default<BE, B, R>(
         + VmpApplyDftToDft<BE>,
     R: GLWEToBackendMut<BE> + GLWEInfos,
     B: VecZnxToBackendRef<BE> + ZnxInfos,
-    <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static,
+    <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static + Send + Sync,
 {
     let baby_size = precomputations.bsgs_baby_size();
     assert!(chunk_size >= 1, "chunk_size must be >= 1");

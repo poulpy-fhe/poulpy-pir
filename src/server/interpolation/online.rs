@@ -18,12 +18,13 @@ use crate::{
     client::Response,
     interpolation::{InterpolationQuery, InterpolationResponse},
     packing::Packing,
-    parameters::Parameters,
+    parallel::{assign_panels, num_threads, scoped_workers_pooled},
     payload::Payload,
     server::{
         OnlineTimings, Server, ServerCollapse, ServerPrecomputation,
         api::InterpolationServerModule,
         common::{PreparedF64, full_torus_f64_body_product},
+        interpolation::setup::server_scratch_bytes,
     },
 };
 
@@ -71,32 +72,100 @@ where
         timings.add_key_precompute("interpolation.key_precompute", t.elapsed());
 
         let body_size = self.params.size_at(self.params.base2k());
+        let out_base2k = self.params.base2k();
+        let body_base2k = self.params.matmul_base2k();
+        let torus_bits = self.params.k();
+        let k = self.layout.block_cols(self.params.n());
+        let nthreads = num_threads(panels);
+
+        // Lazily grow the persistent per-worker scratch pool (allocated once,
+        // reused across queries — plan M2′) so the parallel region pays no
+        // per-query allocation/first-touch fault.
+        while self.scratch_pool.len() < nthreads {
+            self.scratch_pool
+                .push(ScratchOwned::<BE>::alloc(server_scratch_bytes(&self.params)));
+        }
+
+        // One panel per work item: GEMV body product + pack, fully independent
+        // (own pooled scratch, read-only shared precomputes/keys). Output written
+        // by panel index ⇒ bit-identical to the sequential order.
+        type PanelOut<BE> = (Option<GLWE<<BE as Backend>::OwnedBuf>>, [Duration; 2]);
+        let mut outputs: Vec<PanelOut<BE>> =
+            (0..panels).map(|_| (None, [Duration::default(); 2])).collect();
+        let work = assign_panels(panels, k, nthreads);
+
+        let region = Instant::now();
+        {
+            let prepared_u = &precomputation.prepared_u;
+            let precomputes = &precomputation.precomputations;
+            let key_precomp = &key_precomputations;
+            let blocks = &query.common.blocks;
+            let glwe_pack_ref = &glwe_pack;
+
+            let mut out_slabs: Vec<&mut [PanelOut<BE>]> = Vec::with_capacity(work.len());
+            let mut rest = outputs.as_mut_slice();
+            for group in &work {
+                let (head, tail) = rest.split_at_mut(group.len());
+                out_slabs.push(head);
+                rest = tail;
+            }
+            let scratch_slabs: Vec<&mut ScratchOwned<BE>> =
+                self.scratch_pool[..work.len()].iter_mut().collect();
+
+            scoped_workers_pooled::<BE, PanelOut<BE>, _>(
+                out_slabs,
+                scratch_slabs,
+                &work,
+                |slab, group, sc| {
+                    for (slot, w) in slab.iter_mut().zip(group.iter()) {
+                        let panel = w.panel;
+                        let mut body = module.vec_znx_alloc(1, body_size);
+                        let t = Instant::now();
+                        accumulate_body_product::<BE>(
+                            &mut body,
+                            out_base2k,
+                            body_base2k,
+                            torus_bits,
+                            &prepared_u[panel],
+                            blocks,
+                        );
+                        let bp = t.elapsed();
+                        let mut packed = module.glwe_alloc_from_infos(glwe_pack_ref);
+                        let t = Instant::now();
+                        module.pack(
+                            &mut packed,
+                            &body,
+                            &precomputes[panel],
+                            key_precomp,
+                            1,
+                            &mut sc.borrow(),
+                        );
+                        let pk = t.elapsed();
+                        *slot = (Some(packed), [bp, pk]);
+                    }
+                },
+            );
+        }
+        let region_wall = region.elapsed();
+
         let mut body_product = Duration::default();
         let mut pack = Duration::default();
-        let mut packed_coeffs = Vec::with_capacity(panels);
-        for panel in 0..panels {
-            let mut body = module.vec_znx_alloc(1, body_size);
-            let t = Instant::now();
-            accumulate_body_product(
-                &self.params,
-                &mut body,
-                &precomputation.prepared_u[panel],
-                &query.common.blocks,
-            );
-            body_product += t.elapsed();
-            let mut packed = module.glwe_alloc_from_infos(&glwe_pack);
-            let t = Instant::now();
-            module.pack(
-                &mut packed,
-                &body,
-                &precomputation.precomputations[panel],
-                &key_precomputations,
-                1,
-                &mut self.scratch.borrow(),
-            );
-            pack += t.elapsed();
-            packed_coeffs.push(packed);
+        for (_, [bp, pk]) in &outputs {
+            body_product += *bp;
+            pack += *pk;
         }
+        // Rescale phase CPU times to the parallel region's wall-clock so the
+        // online breakdown sums to true wall time.
+        if nthreads > 1 {
+            let cpu = body_product + pack;
+            if !cpu.is_zero() {
+                let scale = region_wall.as_secs_f64() / cpu.as_secs_f64();
+                body_product = body_product.mul_f64(scale);
+                pack = pack.mul_f64(scale);
+            }
+        }
+        let packed_coeffs: Vec<GLWE<BE::OwnedBuf>> =
+            outputs.into_iter().map(|(p, _)| p.unwrap()).collect();
         timings.add_body_product("interpolation.body_product", body_product);
         timings.add_pack("interpolation.pack", pack);
 
@@ -126,20 +195,15 @@ where
 /// `out_body = sum_bc U[bc] · b[bc]` for one interpolation panel, via the dense
 /// `f64` GEMV. Writes a small body `VecZnx` (online only needs the body, not the
 /// mask) directly in the pack regime.
-fn accumulate_body_product<BE, P: Payload<[u8; 32]>>(
-    params: &Parameters<BE, [u8; 32], P>,
+fn accumulate_body_product<BE>(
     out_body: &mut VecZnx<BE::OwnedBuf>,
+    out_base2k: usize,
+    body_base2k: usize,
+    torus_bits: usize,
     u_panel: &[PreparedF64],
     bodies: &[GLWECompressed<BE::OwnedBuf>],
 ) where
     BE: Backend<OwnedBuf = Vec<u8>> + poulpy_cpu_ref::reference::fft64::reim::ReimArith,
 {
-    full_torus_f64_body_product::<BE>(
-        out_body,
-        params.base2k(),
-        u_panel,
-        bodies,
-        params.matmul_base2k(),
-        params.k(),
-    );
+    full_torus_f64_body_product::<BE>(out_body, out_base2k, u_panel, bodies, body_base2k, torus_bits);
 }

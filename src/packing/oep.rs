@@ -42,6 +42,18 @@ pub unsafe trait PackingMaskAggregationImpl<BE: Backend>: Backend {
         R: VecZnxToBackendMut<BE> + ZnxInfos,
         A: VecZnxToBackendRef<BE> + ZnxInfos;
 
+    /// Backend hook for threaded packing-mask aggregation.
+    fn packing_mask_preprocessing_threaded_impl<R, A>(
+        module: &Module<BE>,
+        dst: &mut R,
+        base2k: usize,
+        a: &A,
+        intra_threads: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos;
+
     /// Backend hook for partial packing-mask aggregation scratch estimation.
     fn pack_partial_mask_preprocessing_tmp_bytes_impl(
         module: &Module<BE>,
@@ -56,6 +68,19 @@ pub unsafe trait PackingMaskAggregationImpl<BE: Backend>: Backend {
         base2k: usize,
         gamma: usize,
         a: &A,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos;
+
+    /// Backend hook for threaded partial packing-mask aggregation.
+    fn pack_partial_mask_preprocessing_threaded_impl<R, A>(
+        module: &Module<BE>,
+        dst: &mut R,
+        base2k: usize,
+        gamma: usize,
+        a: &A,
+        intra_threads: usize,
         scratch: &mut ScratchArena<'_, BE>,
     ) where
         R: VecZnxToBackendMut<BE> + ZnxInfos,
@@ -84,6 +109,20 @@ where
         module.packing_mask_preprocessing_default(dst, base2k, a, scratch);
     }
 
+    fn packing_mask_preprocessing_threaded_impl<R, A>(
+        module: &Module<BE>,
+        dst: &mut R,
+        base2k: usize,
+        a: &A,
+        intra_threads: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos,
+    {
+        module.packing_mask_preprocessing_threaded_default(dst, base2k, a, intra_threads, scratch);
+    }
+
     fn pack_partial_mask_preprocessing_tmp_bytes_impl(
         module: &Module<BE>,
         gamma: usize,
@@ -104,6 +143,28 @@ where
         A: VecZnxToBackendRef<BE> + ZnxInfos,
     {
         module.packing_mask_preprocessing_partial_default(dst, base2k, gamma, a, scratch);
+    }
+
+    fn pack_partial_mask_preprocessing_threaded_impl<R, A>(
+        module: &Module<BE>,
+        dst: &mut R,
+        base2k: usize,
+        gamma: usize,
+        a: &A,
+        intra_threads: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos,
+    {
+        module.packing_mask_preprocessing_partial_threaded_default(
+            dst,
+            base2k,
+            gamma,
+            a,
+            intra_threads,
+            scratch,
+        );
     }
 }
 

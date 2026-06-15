@@ -4,6 +4,7 @@ pub mod database;
 pub mod encoding;
 pub mod interpolation;
 pub mod packing;
+pub(crate) mod parallel;
 pub mod parameters;
 pub mod payload;
 pub mod server;

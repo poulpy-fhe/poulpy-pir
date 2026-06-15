@@ -148,21 +148,21 @@ impl PreparedF64 {
 
 /// Computes the fixed mask product `sum_i U_i · A_i` and encodes it into the pack
 /// regime as an [`LWEMatrix`], via the dense full-torus `f64` GEMM.
-pub(super) fn mask_product_to_pack<BE, I, P>(
+pub(super) fn mask_product_to_pack<BE, I>(
     module: &Module<BE>,
-    params: &Parameters<BE, [u8; 32], P>,
     out_infos: &I,
     prepared: &[PreparedF64],
     masks: &[QueryMask],
+    torus_bits: usize,
+    mask_threads: usize,
 ) -> LWEMatrix<BE::OwnedBuf>
 where
     BE: Backend<OwnedBuf = Vec<u8>> + ReimArith,
     I: LWEMatrixInfos,
-    P: Payload<[u8; 32]>,
     Module<BE>: ModuleCoreAlloc<OwnedBuf = Vec<u8>>,
 {
     let mut out = module.lwe_matrix_alloc_from_infos(out_infos);
-    full_torus_f64_mask_product::<BE>(&mut out, prepared, masks, params.k());
+    full_torus_f64_mask_product::<BE>(&mut out, prepared, masks, torus_bits, mask_threads);
     out
 }
 
@@ -187,11 +187,30 @@ impl QueryMask {
     }
 }
 
+/// Accumulates `acc += sum_{bc in range} U_bc · A_bc` over a contiguous range of
+/// block columns, in ascending `bc` order (the per-group partial of the tiled
+/// mask product). Single-threaded `private-gemm` per block.
+fn accumulate_mask_range(
+    acc: &mut [f64],
+    prepared: &[PreparedF64],
+    masks: &[QueryMask],
+    rows_out: usize,
+    lwe_n: usize,
+    range: std::ops::Range<usize>,
+) {
+    for bc in range {
+        let u = &prepared[bc];
+        let rhs = &masks[bc];
+        gemm_f64_add(acc, &u.values, &rhs.values, rows_out, u.rows_in, lwe_n);
+    }
+}
+
 fn full_torus_f64_mask_product<BE>(
     out: &mut LWEMatrix<BE::OwnedBuf>,
     prepared: &[PreparedF64],
     masks: &[QueryMask],
     torus_bits: usize,
+    mask_threads: usize,
 ) where
     BE: Backend<OwnedBuf = Vec<u8>> + ReimArith,
 {
@@ -204,8 +223,6 @@ fn full_torus_f64_mask_product<BE>(
 
     let rows_out = out.mask().n();
     let lwe_n = out.mask().cols();
-    let mut acc = vec![0.0f64; rows_out * lwe_n];
-
     for (u, rhs) in prepared.iter().zip(masks) {
         assert_eq!(
             u.rows_out, rows_out,
@@ -216,14 +233,60 @@ fn full_torus_f64_mask_product<BE>(
             u.rows_in, rhs.rows,
             "coefficient matrix input rows and query mask rows differ"
         );
-
-        // Dense `f64` product `acc += U * A`, accumulated over the matrices,
-        // single-threaded (AVX2/AVX-512 auto-selected at runtime).
-        gemm_f64_add(&mut acc, &u.values, &rhs.values, rows_out, u.rows_in, lwe_n);
     }
+
+    let acc = mask_product_acc(prepared, masks, rows_out, lwe_n, mask_threads);
 
     out.body_mut().raw_mut().fill(0);
     encode_torus_mask_f64::<BE>(out, &acc, rows_out, lwe_n, torus_bits);
+}
+
+/// The pure-`f64` mask accumulation `sum_bc U_bc · A_bc`, optionally block-tiled
+/// across `mask_threads` threads. `mask_threads <= 1` is the exact sequential
+/// left-fold (reference order). For `nt > 1` the `bc` range is split into `nt`
+/// contiguous ascending groups summed in parallel, then the partials are reduced
+/// in ascending group order — deterministic for a given `nt`, but not
+/// bit-identical to the sequential fold across different `nt` (f64 addition is
+/// non-associative; the gap is far below the FHE noise floor).
+fn mask_product_acc(
+    prepared: &[PreparedF64],
+    masks: &[QueryMask],
+    rows_out: usize,
+    lwe_n: usize,
+    mask_threads: usize,
+) -> Vec<f64> {
+    let k = prepared.len();
+    let nt = mask_threads.clamp(1, k);
+    if nt <= 1 {
+        let mut acc = vec![0.0f64; rows_out * lwe_n];
+        accumulate_mask_range(&mut acc, prepared, masks, rows_out, lwe_n, 0..k);
+        return acc;
+    }
+
+    let base = k / nt;
+    let rem = k % nt;
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(nt);
+    let mut start = 0;
+    for i in 0..nt {
+        let len = base + usize::from(i < rem);
+        ranges.push(start..start + len);
+        start += len;
+    }
+    let mut partials: Vec<Vec<f64>> = (0..nt).map(|_| vec![0.0f64; rows_out * lwe_n]).collect();
+    std::thread::scope(|scope| {
+        for (part, range) in partials.iter_mut().zip(ranges.into_iter()) {
+            scope.spawn(move || {
+                accumulate_mask_range(part, prepared, masks, rows_out, lwe_n, range);
+            });
+        }
+    });
+    let mut acc = std::mem::take(&mut partials[0]);
+    for part in &partials[1..] {
+        for (a, p) in acc.iter_mut().zip(part.iter()) {
+            *a += *p;
+        }
+    }
+    acc
 }
 
 /// Computes the body product `sum_i U_i · b_i` (a GEMV, `lwe_n = 1`) and encodes it
@@ -470,4 +533,74 @@ pub(super) fn copy_lwe_matrix_mask_rows<D>(
         src_row_offset,
         rows,
     );
+}
+
+#[cfg(test)]
+mod mask_product_tests {
+    use super::{PreparedF64, QueryMask, mask_product_acc};
+
+    /// Deterministic pseudo-random f64 in `[lo, hi)`.
+    fn prng(state: &mut u64) -> f64 {
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((*state >> 11) as f64) / ((1u64 << 53) as f64)
+    }
+
+    fn synthetic(k: usize, rows_out: usize, rows_in: usize, lwe_n: usize) -> (Vec<PreparedF64>, Vec<QueryMask>) {
+        let mut s = 0x1234_5678_9abc_def0u64;
+        let prepared = (0..k)
+            .map(|_| {
+                // U entries are centered i16-range integers (the database operand).
+                let values: Vec<f64> = (0..rows_out * rows_in)
+                    .map(|_| (prng(&mut s) * 65536.0 - 32768.0).round())
+                    .collect();
+                PreparedF64 { values, rows_out, rows_in }
+            })
+            .collect();
+        let masks = (0..k)
+            .map(|_| {
+                // A entries are torus reals in [-0.5, 0.5).
+                let values: Vec<f64> = (0..rows_in * lwe_n).map(|_| prng(&mut s) - 0.5).collect();
+                QueryMask { values, rows: rows_in, cols: lwe_n }
+            })
+            .collect();
+        (prepared, masks)
+    }
+
+    #[test]
+    fn tiled_matches_sequential_within_noise_floor() {
+        let (rows_out, rows_in, lwe_n, k) = (16, 16, 4, 13);
+        let (prepared, masks) = synthetic(k, rows_out, rows_in, lwe_n);
+        let seq = mask_product_acc(&prepared, &masks, rows_out, lwe_n, 1);
+        // The accumulated magnitude here is ~rows_in * 2^15 * 0.5 * k ≈ 2^25; the
+        // f64 ulp is ~2^-27, so any reorder gap is a few ulps. The torus encode
+        // rounds at ~2^-(53-torus_bits) of that, far coarser. Assert the relative
+        // gap is < 1e-9 (cryptographically equivalent).
+        for nt in [2, 3, 4, 8, k, k + 5] {
+            let tiled = mask_product_acc(&prepared, &masks, rows_out, lwe_n, nt);
+            assert_eq!(tiled.len(), seq.len());
+            let max_abs: f64 = seq
+                .iter()
+                .zip(&tiled)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f64::max);
+            let scale: f64 = seq.iter().map(|v| v.abs()).fold(1.0, f64::max);
+            assert!(
+                max_abs / scale < 1e-9,
+                "nt={nt}: relative gap {} exceeds tolerance",
+                max_abs / scale
+            );
+        }
+    }
+
+    #[test]
+    fn single_block_is_thread_count_invariant() {
+        // With k=1 there is nothing to reorder: every thread count is identical.
+        let (rows_out, rows_in, lwe_n) = (8, 8, 3);
+        let (prepared, masks) = synthetic(1, rows_out, rows_in, lwe_n);
+        let seq = mask_product_acc(&prepared, &masks, rows_out, lwe_n, 1);
+        for nt in [2, 4, 16] {
+            let tiled = mask_product_acc(&prepared, &masks, rows_out, lwe_n, nt);
+            assert_eq!(seq, tiled, "k=1 must be bit-identical for nt={nt}");
+        }
+    }
 }

@@ -38,6 +38,20 @@ where
         BE::packing_mask_preprocessing_impl(self, dst, base2k, a, scratch);
     }
 
+    fn packing_mask_preprocessing_threaded<R, A>(
+        &self,
+        dst: &mut R,
+        base2k: usize,
+        a: &A,
+        intra_threads: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos,
+    {
+        BE::packing_mask_preprocessing_threaded_impl(self, dst, base2k, a, intra_threads, scratch);
+    }
+
     fn pack_partial_mask_preprocessing_tmp_bytes(&self, gamma: usize, size: usize) -> usize {
         BE::pack_partial_mask_preprocessing_tmp_bytes_impl(self, gamma, size)
     }
@@ -54,6 +68,29 @@ where
         A: VecZnxToBackendRef<BE> + ZnxInfos,
     {
         BE::pack_partial_mask_preprocessing_impl(self, dst, base2k, gamma, a, scratch);
+    }
+
+    fn packing_partial_mask_preprocessing_threaded<R, A>(
+        &self,
+        dst: &mut R,
+        base2k: usize,
+        gamma: usize,
+        a: &A,
+        intra_threads: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos,
+    {
+        BE::pack_partial_mask_preprocessing_threaded_impl(
+            self,
+            dst,
+            base2k,
+            gamma,
+            a,
+            intra_threads,
+            scratch,
+        );
     }
 }
 

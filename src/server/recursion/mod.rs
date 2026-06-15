@@ -31,7 +31,7 @@ use crate::{
     packing::{PackingKeys, PackingPrecomputations},
     payload::Payload,
     server::{
-        Server, ServerCollapse, ServerPrecomputation, common::PreparedF64, common::QueryMask,
+        Server, ServerCollapse, common::PreparedF64, common::QueryMask,
     },
 };
 
@@ -105,12 +105,6 @@ struct PackMaskDurations {
     pack_precompute: Duration,
 }
 
-#[derive(Clone, Copy)]
-struct PackBodyPhaseNames {
-    body_product: &'static str,
-    pack: &'static str,
-}
-
 /// Collapse-specific InsPIRe² state kept outside the common [`Server`] fields.
 pub(crate) struct RecursionState<BE: Backend> {
     pub(crate) src_infos: EncryptionLayout<GLWELayout>,
@@ -135,14 +129,4 @@ impl<BE: Backend, P: Payload<[u8; 32]>> Server<BE, P> {
         state
     }
 
-    fn recursion_precomputation(&self) -> &RecursionPrecomputation<BE> {
-        let ServerPrecomputation::Recursion(precomputation) = &self.precomputation else {
-            panic!("InsPIRe² precomputation requested for non-InsPIRe² server");
-        };
-        assert!(
-            !precomputation.l1_precompute.is_empty(),
-            "call Server::offline() before respond()"
-        );
-        precomputation
-    }
 }

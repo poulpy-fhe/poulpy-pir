@@ -500,11 +500,17 @@ fn recursion_api_roundtrip_larger() {
             .iter()
             .map(|v| v.rem_euclid(p))
             .collect();
-        assert_eq!(
-            got,
-            server.database().record(i0, i1),
-            "record ({i0}, {i1}) mismatch"
-        );
+        // The PIR recovers each record digit mod p. The database stores digits
+        // centered into i16, so `record()` returns the signed representative
+        // (e.g. -1174 for 64362 when p = 2^16); reduce it to the same [0, p)
+        // canonical form as `got` before comparing.
+        let want: Vec<i64> = server
+            .database()
+            .record(i0, i1)
+            .iter()
+            .map(|v| v.rem_euclid(p))
+            .collect();
+        assert_eq!(got, want, "record ({i0}, {i1}) mismatch");
     }
 }
 

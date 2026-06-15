@@ -25,3 +25,8 @@ harness = false
 name = "mask_product"
 path = "benches/mask_product/main.rs"
 harness = false
+
+[dev-dependencies]
+# Re-declared (also a normal dependency) so the self-contained `mask_product`
+# bench can drive the same f64 GEMM kernel the server uses.
+private-gemm-x86 = { version = "=0.1.20", default-features = false }

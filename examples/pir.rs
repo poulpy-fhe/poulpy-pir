@@ -25,13 +25,13 @@ use poulpy_pir::{
 /// Backend used by this driver.
 type BE = FFT64Avx;
 
-const DB_ROWS: usize = 4096;
-const DB_COLS: usize = 8192;
+const DB_ROWS: usize = 16384;
+const DB_COLS: usize = 32768;
 
 fn main() {
     const ITEM_INDEX: usize = 1_000_000;
 
-    if true {
+    if false {
         run(
             INSPIRE_INT_32B,
             DatabaseLayout::<U256P65535>::new(DB_ROWS, DB_COLS),

@@ -5,24 +5,27 @@ use std::time::{Duration, Instant};
 
 use poulpy_core::layouts::{
     Degree, GLWE, GLWEAutomorphismKeyCompressed, GLWEInfos, GLWEToBackendMut, GLWEToBackendRef,
-    LWEInfos, LWEMatrix, LWEMatrixToBackendMut, ModuleCoreAlloc,
+    LWEInfos, LWEMatrix, LWEMatrixLayout, LWEMatrixToBackendMut, ModuleCoreAlloc,
 };
 use poulpy_hal::{
     api::{ScratchOwnedAlloc, ScratchOwnedBorrow},
     layouts::{
-        Backend, HostDataMut, HostDataRef, Module, ScratchOwned, VecZnx, VecZnxToBackendMut,
-        VecZnxToBackendRef,
+        Backend, HostDataMut, HostDataRef, Module, ScratchArena, ScratchOwned, VecZnx,
+        VecZnxToBackendMut, VecZnxToBackendRef, ZnxInfos,
     },
     source::Source,
 };
 
 use crate::{
-    packing::{Packing, PackingKeysGenerate, PackingMaskAggregation},
+    packing::{Packing, PackingKeysGenerate, PackingMaskAggregation, PackingPrecomputeInfos,
+        PackingPrecomputations},
+    parallel::{assign_panels, num_threads, scoped_workers},
     payload::Payload,
     server::{
         OfflineTimings, Server, ServerCollapse, ServerPrecomputation,
         api::InterpolationServerModule,
-        common::{PreparedF64, mask_product_to_pack},
+        common::{PreparedF64, QueryMask, mask_product_to_pack},
+        interpolation::setup::server_scratch_bytes,
     },
 };
 
@@ -66,6 +69,19 @@ where
         timings.add_ua_mask("interpolation.ua_mask", ua_mask);
         timings.add_mask_prep("interpolation.mask_prep", mask_prep);
         timings.add_pack_precompute("interpolation.pack_precompute", pack_precompute);
+
+        // Warm the online per-worker scratch pool here (OFFLINE), so the first
+        // query doesn't pay the per-worker arena allocation (plan M2′).
+        let panels = match &self.collapse {
+            ServerCollapse::Interpolation(state) => state.interpolation.num_panels(),
+            ServerCollapse::Recursion(_) => unreachable!(),
+        };
+        let nthreads = num_threads(panels);
+        while self.scratch_pool.len() < nthreads {
+            self.scratch_pool
+                .push(ScratchOwned::<BE>::alloc(server_scratch_bytes(&self.params)));
+        }
+
         timings
     }
 
@@ -148,7 +164,6 @@ where
         let module = self.params.module();
         let lwe_infos = self.params.lwe_matrix_infos();
         let precompute_metadata = self.params.packing_precompute_infos();
-        let mut aggregate = module.vec_znx_alloc(self.params.n(), lwe_infos.size());
         let panels = {
             let ServerCollapse::Interpolation(state) = &self.collapse else {
                 panic!("interpolation offline requested for non-interpolation server");
@@ -156,53 +171,161 @@ where
             state.interpolation.num_panels()
         };
 
-        let mut ua_mask = Duration::default();
-        let mut mask_prep = Duration::default();
-        let mut pack_precompute = Duration::default();
-        let mut precomputations = Vec::with_capacity(panels);
+        // One panel per work item; panels are fully independent (own aggregate,
+        // own per-worker scratch). Output written by panel index ⇒ bit-identical
+        // to the sequential order regardless of thread count.
+        type PanelOut<BE> = (Option<PackingPrecomputations<BE>>, [Duration; 3]);
+        let mut outputs: Vec<PanelOut<BE>> =
+            (0..panels).map(|_| (None, [Duration::default(); 3])).collect();
+
+        let k = self.layout.block_cols(self.params.n());
+        let nthreads = num_threads(panels);
+        let work = assign_panels(panels, k, nthreads);
+        let bytes = server_scratch_bytes(&self.params);
+        // M3 block-tiling: when panels under-fill the machine (P < cores), give
+        // each panel's mask-product GEMM the spare cores to tile its K-way
+        // contraction. `mask_threads = 1` (incl. PIR_THREADS=1) keeps the exact
+        // sequential fold. Nesting is safe: the mask product is scratch-free.
+        let mask_threads = (num_threads(usize::MAX) / nthreads).max(1);
+        // P-free scalars captured by the worker closure (avoids capturing
+        // `&Parameters<_, _, P>`, whose `PhantomData<P>` would force `P: Sync`).
+        let n = self.params.n();
+        let base2k = self.params.base2k();
+        let torus_bits = self.params.k();
+
+        let region = Instant::now();
         {
             let ServerPrecomputation::Interpolation(precomputation) = &self.precomputation else {
                 panic!("interpolation precomputation requested for non-interpolation server");
             };
-            for panel in 0..panels {
-                let t = Instant::now();
-                let product = mask_product_to_pack(
-                    module,
-                    &self.params,
-                    &lwe_infos,
-                    &precomputation.prepared_u[panel],
-                    &precomputation.masks,
-                );
-                ua_mask += t.elapsed();
-                let t = Instant::now();
-                module.packing_mask_preprocessing(
-                    &mut aggregate,
-                    self.params.base2k(),
-                    product.mask(),
-                    &mut self.scratch.borrow(),
-                );
-                mask_prep += t.elapsed();
-                let mut precompute = module.pack_precompute_alloc(
-                    precompute_metadata.steps(),
-                    precompute_metadata.size(),
-                    precompute_metadata.base2k(),
-                    precompute_metadata.baby_size(),
-                );
-                let t = Instant::now();
-                module.pack_precompute(
-                    &mut precompute,
-                    &aggregate,
-                    key_mask_src,
-                    &mut self.scratch.borrow(),
-                );
-                pack_precompute += t.elapsed();
-                precomputations.push(precompute);
+            let prepared_u = &precomputation.prepared_u;
+            let masks = &precomputation.masks;
+            let lwe_infos = &lwe_infos;
+            let precompute_metadata = &precompute_metadata;
+
+            // Split the output buffer into group-aligned disjoint slabs.
+            let mut slabs: Vec<&mut [PanelOut<BE>]> = Vec::with_capacity(work.len());
+            let mut rest = outputs.as_mut_slice();
+            for group in &work {
+                let (head, tail) = rest.split_at_mut(group.len());
+                slabs.push(head);
+                rest = tail;
+            }
+
+            scoped_workers::<BE, PanelOut<BE>, _>(slabs, &work, bytes, |slab, group, sc| {
+                for (slot, w) in slab.iter_mut().zip(group.iter()) {
+                    let (precompute, ua, prep, pp) = compute_panel_precompute(
+                        module,
+                        n,
+                        base2k,
+                        torus_bits,
+                        mask_threads,
+                        lwe_infos,
+                        precompute_metadata,
+                        &prepared_u[w.panel],
+                        masks,
+                        key_mask_src,
+                        &mut sc.borrow(),
+                    );
+                    *slot = (Some(precompute), [ua, prep, pp]);
+                }
+            });
+        }
+        let region_wall = region.elapsed();
+
+        // Per-phase CPU times summed across panels. When threaded, rescale them
+        // so the three phases sum to the parallel region's wall-clock — keeping
+        // `OFFLINE total` (a sum of phases) a true wall-clock figure while the
+        // relative breakdown is preserved.
+        let mut ua_mask = Duration::default();
+        let mut mask_prep = Duration::default();
+        let mut pack_precompute = Duration::default();
+        for (_, [ua, prep, pp]) in &outputs {
+            ua_mask += *ua;
+            mask_prep += *prep;
+            pack_precompute += *pp;
+        }
+        if nthreads > 1 {
+            let cpu = ua_mask + mask_prep + pack_precompute;
+            if !cpu.is_zero() {
+                let scale = region_wall.as_secs_f64() / cpu.as_secs_f64();
+                ua_mask = ua_mask.mul_f64(scale);
+                mask_prep = mask_prep.mul_f64(scale);
+                pack_precompute = pack_precompute.mul_f64(scale);
             }
         }
+
+        let precomputations: Vec<PackingPrecomputations<BE>> =
+            outputs.into_iter().map(|(p, _)| p.unwrap()).collect();
         let ServerPrecomputation::Interpolation(precomputation) = &mut self.precomputation else {
             panic!("interpolation precomputation requested for non-interpolation server");
         };
         precomputation.precomputations = precomputations;
         (ua_mask, mask_prep, pack_precompute)
     }
+}
+
+/// One interpolation panel's query-independent precompute: the fixed mask
+/// product `U·A` (GEMM), its mask preprocessing into a fresh per-call
+/// `aggregate`, and the pack precompute. Pure w.r.t. shared state (own
+/// `aggregate`, caller-supplied `scratch`) so it is safe to run one panel per
+/// worker thread. Returns the precompute and the `(ua_mask, mask_prep,
+/// pack_precompute)` sub-timings.
+#[allow(clippy::too_many_arguments)]
+fn compute_panel_precompute<BE>(
+    module: &Module<BE>,
+    n: usize,
+    base2k: usize,
+    torus_bits: usize,
+    mask_threads: usize,
+    lwe_infos: &LWEMatrixLayout,
+    precompute_metadata: &PackingPrecomputeInfos,
+    prepared_u_panel: &[PreparedF64],
+    masks: &[QueryMask],
+    key_mask_src: &GLWEAutomorphismKeyCompressed<BE::OwnedBuf>,
+    scratch: &mut ScratchArena<'_, BE>,
+) -> (PackingPrecomputations<BE>, Duration, Duration, Duration)
+where
+    BE: Backend<OwnedBuf = Vec<u8>> + poulpy_cpu_ref::reference::fft64::reim::ReimArith,
+    Module<BE>: InterpolationServerModule<BE> + ModuleCoreAlloc<OwnedBuf = Vec<u8>>,
+    VecZnx<Vec<u8>>: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE> + ZnxInfos,
+    LWEMatrix<Vec<u8>>: LWEMatrixToBackendMut<BE>,
+    for<'b> BE::BufRef<'b>: HostDataRef,
+    for<'b> BE::BufMut<'b>: HostDataMut,
+{
+    let t = Instant::now();
+    let product =
+        mask_product_to_pack(module, lwe_infos, prepared_u_panel, masks, torus_bits, mask_threads);
+    let ua = t.elapsed();
+
+    // Per-call aggregate (was a shared buffer reused across panels) — this is
+    // what makes the panel independent and thread-safe.
+    let mut aggregate = module.vec_znx_alloc(n, lwe_infos.size());
+    let t = Instant::now();
+    if mask_threads > 1 {
+        // Intra-op parallelism over the `n/2` `h`-leaves; same budget as the
+        // mask-product tiling, so the panel × intra nesting stays balanced.
+        module.packing_mask_preprocessing_threaded(
+            &mut aggregate,
+            base2k,
+            product.mask(),
+            mask_threads,
+            scratch,
+        );
+    } else {
+        module.packing_mask_preprocessing(&mut aggregate, base2k, product.mask(), scratch);
+    }
+    let prep = t.elapsed();
+
+    let mut precompute = module.pack_precompute_alloc(
+        precompute_metadata.steps(),
+        precompute_metadata.size(),
+        precompute_metadata.base2k(),
+        precompute_metadata.baby_size(),
+    );
+    let t = Instant::now();
+    module.pack_precompute(&mut precompute, &aggregate, key_mask_src, scratch);
+    let pp = t.elapsed();
+
+    (precompute, ua, prep, pp)
 }

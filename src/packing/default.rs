@@ -36,7 +36,8 @@ use crate::packing::{
     },
     packing_mask_preprocessing::{
         packing_mask_preprocessing_default, packing_mask_preprocessing_partial_default,
-        packing_mask_preprocessing_partial_tmp_bytes_default,
+        packing_mask_preprocessing_partial_threaded,
+        packing_mask_preprocessing_partial_tmp_bytes_default, packing_mask_preprocessing_threaded,
         packing_mask_preprocessing_tmp_bytes_default,
     },
     packing_precomputations::{
@@ -64,6 +65,18 @@ pub trait PackingMaskAggregationDefault<BE: Backend> {
         R: VecZnxToBackendMut<BE> + ZnxInfos,
         A: VecZnxToBackendRef<BE> + ZnxInfos;
 
+    /// Default threaded packing-mask aggregation implementation.
+    fn packing_mask_preprocessing_threaded_default<R, A>(
+        &self,
+        dst: &mut R,
+        base2k: usize,
+        a: &A,
+        intra_threads: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos;
+
     /// Default scratch estimate for partial packing-mask aggregation.
     fn packing_mask_preprocessing_partial_tmp_bytes_default(
         &self,
@@ -78,6 +91,19 @@ pub trait PackingMaskAggregationDefault<BE: Backend> {
         base2k: usize,
         gamma: usize,
         a: &A,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos;
+
+    /// Default threaded partial packing-mask aggregation implementation.
+    fn packing_mask_preprocessing_partial_threaded_default<R, A>(
+        &self,
+        dst: &mut R,
+        base2k: usize,
+        gamma: usize,
+        a: &A,
+        intra_threads: usize,
         scratch: &mut ScratchArena<'_, BE>,
     ) where
         R: VecZnxToBackendMut<BE> + ZnxInfos,
@@ -189,7 +215,7 @@ pub trait PackingDefault<BE: Backend> {
         B: VecZnxToBackendRef<BE> + ZnxInfos;
 }
 
-impl<BE: Backend> PackingMaskAggregationDefault<BE> for Module<BE>
+impl<BE: Backend<OwnedBuf = Vec<u8>>> PackingMaskAggregationDefault<BE> for Module<BE>
 where
     Self: VecZnxCopyBackend<BE>
         + VecZnxTransposeBackend<BE>
@@ -200,7 +226,9 @@ where
         + VecZnxRshAssignBackend<BE>
         + VecZnxRshTmpBytes
         + VecZnxZeroBackend<BE>
-        + GaloisElement,
+        + GaloisElement
+        + ModuleCoreAlloc<OwnedBuf = Vec<u8>>,
+    VecZnx<Vec<u8>>: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE>,
 {
     fn packing_mask_preprocessing_tmp_bytes_default(&self, size: usize) -> usize {
         packing_mask_preprocessing_tmp_bytes_default(self, size)
@@ -217,6 +245,20 @@ where
         A: VecZnxToBackendRef<BE> + ZnxInfos,
     {
         packing_mask_preprocessing_default(self, dst, base2k, a, scratch);
+    }
+
+    fn packing_mask_preprocessing_threaded_default<R, A>(
+        &self,
+        dst: &mut R,
+        base2k: usize,
+        a: &A,
+        intra_threads: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos,
+    {
+        packing_mask_preprocessing_threaded(self, dst, base2k, a, intra_threads, scratch);
     }
 
     fn packing_mask_preprocessing_partial_tmp_bytes_default(
@@ -239,6 +281,29 @@ where
         A: VecZnxToBackendRef<BE> + ZnxInfos,
     {
         packing_mask_preprocessing_partial_default(self, dst, base2k, gamma, a, scratch);
+    }
+
+    fn packing_mask_preprocessing_partial_threaded_default<R, A>(
+        &self,
+        dst: &mut R,
+        base2k: usize,
+        gamma: usize,
+        a: &A,
+        intra_threads: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: VecZnxToBackendMut<BE> + ZnxInfos,
+        A: VecZnxToBackendRef<BE> + ZnxInfos,
+    {
+        packing_mask_preprocessing_partial_threaded(
+            self,
+            dst,
+            base2k,
+            gamma,
+            a,
+            intra_threads,
+            scratch,
+        );
     }
 }
 
@@ -267,7 +332,7 @@ where
         + GLWEMaskFillDefault<BE>
         + ModuleCoreAlloc<OwnedBuf = BE::OwnedBuf>,
     Module<BE>: VmpApplyDftToDftTmpBytes,
-    <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static,
+    <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static + Send + Sync,
     VecZnx<BE::OwnedBuf>: VecZnxToBackendRef<BE>,
 {
     fn pack_keys_precompute_tmp_bytes_default<KG, KH>(
@@ -501,11 +566,10 @@ pub(crate) fn pack_precompute_partial<BE, A, KMask>(
         + VmpApplyDftToDftTmpBytes
         + GGLWEPreparedFactory<BE>
         + GLWEMaskFillDefault<BE>,
-    <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static,
+    <Module<BE> as VecZnxDftAutomorphismPlan<BE>>::Plan: 'static + Send + Sync,
     VecZnx<BE::OwnedBuf>: VecZnxToBackendRef<BE>,
     A: VecZnxToBackendRef<BE> + ZnxInfos,
     KMask: GGLWECompressedSeed + GGLWEInfos,
-    for<'a> ScratchArena<'a, BE>: poulpy_hal::api::ScratchArenaTakeBasic<'a, BE>,
 {
     assert_eq!(
         precomputations.size(),

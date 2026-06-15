@@ -88,6 +88,7 @@ where
             server_seed,
             database,
             scratch,
+            scratch_pool: Vec::new(),
             collapse: ServerCollapse::Interpolation(InterpolationState {
                 interpolation,
                 matrix,
