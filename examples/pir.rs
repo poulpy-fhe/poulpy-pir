@@ -25,8 +25,8 @@ use poulpy_pir::{
 /// Backend used by this driver.
 type BE = FFT64Avx;
 
-const DB_ROWS: usize = 16384;
-const DB_COLS: usize = 32768;
+const DB_ROWS: usize = 1<<16;
+const DB_COLS: usize = 1<<18;
 
 fn main() {
     const ITEM_INDEX: usize = 1_000_000;

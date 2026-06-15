@@ -64,7 +64,7 @@ where
         key_stride: usize,
         timings: &mut OfflineTimings,
         phase_names: PackMaskPhaseNames,
-    ) -> (Vec<Vec<PreparedF64>>, Vec<PackingPrecomputations<BE>>) {
+    ) -> (Vec<Vec<PreparedF64<'static>>>, Vec<PackingPrecomputations<BE>>) {
         // OFFLINE: full parallel budget across batches.
         let (prepared, precomputes, durations) = self.precompute_pack_mask_inner(
             all_digits,
@@ -90,7 +90,7 @@ where
         key_stride: usize,
         timings: &mut OnlineTimings,
         phase_names: PackMaskPhaseNames,
-    ) -> (Vec<Vec<PreparedF64>>, Vec<PackingPrecomputations<BE>>) {
+    ) -> (Vec<Vec<PreparedF64<'static>>>, Vec<PackingPrecomputations<BE>>) {
         // ONLINE (resp2): per-query, only `nbatches=2` here — the per-worker scratch
         // alloc + thread spawn dwarfs the tiny work, so run sequentially.
         let (prepared, precomputes, durations) = self.precompute_pack_mask_inner(
@@ -117,7 +117,7 @@ where
         key_stride: usize,
         max_threads: usize,
     ) -> (
-        Vec<Vec<PreparedF64>>,
+        Vec<Vec<PreparedF64<'static>>>,
         Vec<PackingPrecomputations<BE>>,
         PackMaskDurations,
     ) {
@@ -148,7 +148,7 @@ where
         // One batch per work item; batches are independent (own aggregate + scratch,
         // sequential per-batch mask product/prep ⇒ bit-identical). Output by index.
         type BatchOut<BE> = (
-            Option<(Vec<PreparedF64>, PackingPrecomputations<BE>)>,
+            Option<(Vec<PreparedF64<'static>>, PackingPrecomputations<BE>)>,
             [Duration; 4],
         );
         let mut outputs: Vec<BatchOut<BE>> =
@@ -212,7 +212,7 @@ where
             }
         }
 
-        let mut prepared: Vec<Vec<PreparedF64>> = Vec::with_capacity(nbatches);
+        let mut prepared: Vec<Vec<PreparedF64<'static>>> = Vec::with_capacity(nbatches);
         let mut precomputes: Vec<PackingPrecomputations<BE>> = Vec::with_capacity(nbatches);
         for (slot, _) in outputs {
             let (row_prep, precompute) = slot.unwrap();
@@ -229,7 +229,7 @@ where
         gamma: usize,
         key: &KeyBundle<'_, BE>,
         timings: &mut OnlineTimings,
-    ) -> (Vec<Vec<PreparedF64>>, Vec<PackingPrecomputations<BE>>) {
+    ) -> (Vec<Vec<PreparedF64<'static>>>, Vec<PackingPrecomputations<BE>>) {
         self.precompute_pack_mask_online_timed(
             all_digits,
             q_masks,
@@ -305,7 +305,7 @@ fn compute_pack_mask_batch<BE>(
     q_masks: &[QueryMask],
     key_mask_source: &GLWEAutomorphismKeyCompressed<BE::OwnedBuf>,
     scratch: &mut ScratchArena<'_, BE>,
-) -> (Vec<PreparedF64>, PackingPrecomputations<BE>, [Duration; 4])
+) -> (Vec<PreparedF64<'static>>, PackingPrecomputations<BE>, [Duration; 4])
 where
     BE: Backend<OwnedBuf = Vec<u8>> + poulpy_cpu_ref::reference::fft64::reim::ReimArith,
     Module<BE>: RecursionServerModule<BE> + ModuleCoreAlloc<OwnedBuf = Vec<u8>>,
@@ -314,7 +314,7 @@ where
     for<'b> BE::BufMut<'b>: HostDataMut,
 {
     let started = Instant::now();
-    let mut row_prep: Vec<PreparedF64> = Vec::with_capacity(q_masks.len());
+    let mut row_prep: Vec<PreparedF64<'static>> = Vec::with_capacity(q_masks.len());
     for block in 0..q_masks.len() {
         let start = block * n;
         let mut db = CoeffMatrix::zeros(gamma, n);
@@ -385,7 +385,7 @@ pub(super) fn pack_bodies_pooled<BE>(
     base2k: usize,
     torus_bits: usize,
     gamma: usize,
-    prepared: &[Vec<PreparedF64>],
+    prepared: &[Vec<PreparedF64<'_>>],
     precomputes: &[PackingPrecomputations<BE>],
     q_bodies: &[GLWECompressed<BE::OwnedBuf>],
     key_precomp: &PackingKeys<BE>,

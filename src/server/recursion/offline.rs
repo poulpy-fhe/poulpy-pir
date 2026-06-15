@@ -56,13 +56,12 @@ where
         let mut timings = OfflineTimings::default();
         self.ensure_recursion_query_mask(&mut timings);
         let shape = self.recursion_offline_shape();
-        let (db_prep, l1_precompute) = self.offline_recursion_l1(shape, &mut timings);
+        let l1_precompute = self.offline_recursion_l1(shape, &mut timings);
         let mask_data = self.offline_recursion_resp0_mask_data(shape, &l1_precompute, &mut timings);
         let (resp1_prep, resp1_precompute) =
             self.offline_recursion_resp1(shape, &mask_data, &mut timings);
 
         self.precomputation = ServerPrecomputation::Recursion(RecursionPrecomputation {
-            db_prep,
             l1_precompute,
             resp1_prep,
             resp1_precompute,
@@ -72,12 +71,6 @@ where
         // reuse it instead of allocating.
         let bytes = self.scratch_for_pack();
         let nthreads = num_threads(usize::MAX);
-        eprintln!(
-            "  [mem] scratch_for_pack = {:.1} MiB, pool = {} entries = {:.1} MiB",
-            bytes as f64 / (1 << 20) as f64,
-            nthreads,
-            (bytes * nthreads) as f64 / (1 << 20) as f64
-        );
         while self.scratch_pool.len() < nthreads {
             self.scratch_pool.push(ScratchOwned::<BE>::alloc(bytes));
         }
@@ -111,7 +104,7 @@ where
         &mut self,
         shape: RecursionOfflineShape,
         timings: &mut OfflineTimings,
-    ) -> (Vec<Vec<PreparedF64>>, Vec<PackingPrecomputations<BE>>) {
+    ) -> Vec<PackingPrecomputations<BE>> {
         let module = self.params.module();
         let ServerCollapse::Recursion(state) = &self.collapse else {
             panic!("InsPIRe² key requested for non-InsPIRe² server");
@@ -137,14 +130,16 @@ where
         let physical_rows = self.database.physical_rows();
         let torus_bits = self.params.k();
 
-        // Phase 1 (cheap, sequential): decode the DB into per-row-group `f64`
-        // panels. Done up front so the parallel region below captures the owned
-        // `db_prep` (no `&self.database`, hence no `P: Sync`).
+        // Phase 1 (near-free, sequential): build zero-copy `PreparedF64` **views**
+        // over the contiguous plaintext DB blocks (no second copy — the DB lives in
+        // `self.database`). Materialized up front so the parallel region captures
+        // `db_views` (slices, hence `Send + Sync` and no `P: Sync`), not
+        // `&self.database`.
         let started = Instant::now();
-        let db_prep: Vec<Vec<PreparedF64>> = (0..physical_rows)
+        let db_views: Vec<Vec<PreparedF64<'_>>> = (0..physical_rows)
             .map(|row_group| {
                 (0..self.database.column_blocks())
-                    .map(|block| PreparedF64::new(self.database.physical_block(row_group, block)))
+                    .map(|block| PreparedF64::from_matrix(self.database.physical_block(row_group, block)))
                     .collect()
             })
             .collect();
@@ -165,7 +160,7 @@ where
 
         let region = Instant::now();
         {
-            let db_prep = &db_prep;
+            let db_views = &db_views;
             let full_pack_infos = &full_pack_infos;
             let partial_res_infos = &partial_res_infos;
             let mut slabs: Vec<&mut [GroupOut<BE>]> = Vec::with_capacity(work.len());
@@ -191,7 +186,7 @@ where
                         full_pack_infos,
                         partial_res_infos,
                         shape.size,
-                        &db_prep[w.panel],
+                        &db_views[w.panel],
                         q0_masks,
                         key0_mask_source,
                         &mut sc.borrow(),
@@ -229,7 +224,7 @@ where
         timings.add_ua_mask("recursion.l1.mask_product", mask_product);
         timings.add_mask_prep("recursion.l1.mask_prep", mask_prep);
         timings.add_pack_precompute("recursion.l1.pack_precompute", pack_precompute);
-        (db_prep, l1_precompute)
+        l1_precompute
     }
 
     fn offline_recursion_resp0_mask_data(
@@ -264,7 +259,7 @@ where
         shape: RecursionOfflineShape,
         mask_data: &[Vec<i16>],
         timings: &mut OfflineTimings,
-    ) -> (Vec<Vec<PreparedF64>>, Vec<PackingPrecomputations<BE>>) {
+    ) -> (Vec<Vec<PreparedF64<'static>>>, Vec<PackingPrecomputations<BE>>) {
         let state = self.recursion_state();
         assert!(
             !state.q1_masks.is_empty(),

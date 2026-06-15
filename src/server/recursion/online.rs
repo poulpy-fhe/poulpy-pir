@@ -21,7 +21,7 @@ use crate::{
     server::{
         OnlineTimings, Server, ServerCollapse, ServerPrecomputation,
         api::RecursionServerModule,
-        common::{copy_vec_znx_rows, full_torus_f64_body_product},
+        common::{PreparedF64, copy_vec_znx_rows, full_torus_f64_body_product},
     },
 };
 
@@ -92,7 +92,19 @@ where
         // Level-1 body: D·b0, packed with the offline mask precomputes → resp0.
         let rows_per_group = self.database.rows_per_physical_group();
         let physical_rows = self.database.physical_rows();
+        let column_blocks = self.database.column_blocks();
         let torus_bits = self.params.k();
+
+        // Zero-copy `PreparedF64` views over the contiguous plaintext DB — no stored
+        // `db_prep` copy; the data already lives in `self.database`. Slices carry no
+        // `P`, so the parallel body loop below stays `Send + Sync`.
+        let db_views: Vec<Vec<PreparedF64<'_>>> = (0..physical_rows)
+            .map(|rg| {
+                (0..column_blocks)
+                    .map(|block| PreparedF64::from_matrix(self.database.physical_block(rg, block)))
+                    .collect()
+            })
+            .collect();
 
         // Body product `D·b0` + row split is scratch-free, so parallelize across
         // row groups directly (each writes a disjoint output slab; no pool needed).
@@ -103,7 +115,7 @@ where
 
         let started = Instant::now();
         {
-            let db_prep = &off.db_prep;
+            let db_views = &db_views;
             let src0 = &query.src0;
             let mut slabs: Vec<&mut [GroupBodies<BE>]> = Vec::with_capacity(work.len());
             let mut rest = group_bodies.as_mut_slice();
@@ -121,7 +133,7 @@ where
                             full_torus_f64_body_product::<BE>(
                                 &mut res_body,
                                 base2k,
-                                &db_prep[row_group],
+                                &db_views[row_group],
                                 src0,
                                 base2k,
                                 torus_bits,

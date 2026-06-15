@@ -47,13 +47,10 @@ pub(crate) use params::{assert_params_valid, qtilde_bits, src_infos_for, tau};
 ///
 /// [`Server::offline`]: crate::server::Server::offline
 pub struct RecursionPrecomputation<BE: Backend> {
-    /// Level-1 `f64`-decoded physical `n x n` database blocks, reused for the online
-    /// body GEMV. InsPIRe² slices each `n`-row product into `gamma0` records.
-    db_prep: Vec<Vec<PreparedF64>>,
     /// Level-1 mask-side packing precomputes (`t`).
     l1_precompute: Vec<PackingPrecomputations<BE>>,
     /// `resp1` (mask-digit) `f64`-decoded `D1` matrices, reused for the online body GEMV.
-    resp1_prep: Vec<Vec<PreparedF64>>,
+    resp1_prep: Vec<Vec<PreparedF64<'static>>>,
     /// `resp1` mask-side packing precomputes.
     resp1_precompute: Vec<PackingPrecomputations<BE>>,
 }
@@ -61,10 +58,9 @@ pub struct RecursionPrecomputation<BE: Backend> {
 impl<BE: Backend> Default for RecursionPrecomputation<BE> {
     fn default() -> Self {
         Self {
-            db_prep: Vec::new(),
             l1_precompute: Vec::new(),
-            resp1_prep: Vec::new(),
             resp1_precompute: Vec::new(),
+            resp1_prep: Vec::new(),
         }
     }
 }

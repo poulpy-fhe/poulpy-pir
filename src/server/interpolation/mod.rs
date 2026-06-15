@@ -38,7 +38,7 @@ pub struct InterpolationPrecomputation<BE: Backend> {
     pub(crate) masks: Vec<QueryMask>,
     /// `f64`-decoded `U` panels (`interpolation_t × block_cols`), from `offline`;
     /// reused for the offline mask product and the online body product.
-    pub(crate) prepared_u: Vec<Vec<PreparedF64>>,
+    pub(crate) prepared_u: Vec<Vec<PreparedF64<'static>>>,
     /// Fixed mask-side packing precomputations (one per panel), from `offline`.
     pub(crate) precomputations: Vec<PackingPrecomputations<BE>>,
 }

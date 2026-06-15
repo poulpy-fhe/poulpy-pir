@@ -13,6 +13,8 @@ use poulpy_hal::{
     },
 };
 
+use std::borrow::Cow;
+
 use poulpy_cpu_ref::reference::fft64::reim::ReimArith;
 
 use crate::{database::CoeffMatrix, parameters::Parameters, payload::Payload};
@@ -114,35 +116,97 @@ fn normalize_glwe_mask<BE, GF, GM>(
     }
 }
 
-/// Coefficient matrix `U` decoded once into a row-major `f64` panel
-/// (`rows_out × rows_in`), the GEMM-ready form used by both the mask product
-/// (`U·A`, offline) and the body product (`U·b`, online). Caching it here keeps
-/// the online body product decode-free.
-pub(crate) struct PreparedF64 {
-    values: Vec<f64>,
+/// Coefficient matrix `U` flattened once into a row-major **`i16`** panel
+/// (`rows_out × rows_in`), the GEMM-ready contraction operand for both the mask
+/// product (`U·A`, offline) and the body product (`U·b`, online).
+///
+/// Stored as `i16` (not the widened `f64`) to cut the prepared-panel cache to ¼
+/// of its size — for a 1 GiB DB this is ~1 GiB instead of ~4 GiB. The `f64`
+/// `private-gemm` kernel needs `f64` inputs, so each panel is widened into a
+/// caller-owned reusable scratch buffer ([`widen_into`]) right before its GEMM.
+/// The widen is `O(rows_out·rows_in)` and negligible against the `O(n³)` mask
+/// GEMM; it adds one panel read+write to the (memory-bound) body GEMV.
+pub(crate) struct PreparedF64<'a> {
+    values: Cow<'a, [i16]>,
     rows_out: usize,
     rows_in: usize,
 }
 
-impl PreparedF64 {
-    /// Decodes `matrix` into its `f64` panel. Entries are stored as centered
-    /// `i16` (the database / interpolation `U` operand), so the GEMM-ready value
-    /// is a direct `i16 -> f64` widening.
-    pub(crate) fn new(matrix: &CoeffMatrix) -> Self {
-        let rows_out = matrix.rows_out();
-        let rows_in = matrix.rows_in();
-        let mut values = vec![0.0f64; rows_out * rows_in];
-        for out_row in 0..rows_out {
-            let row = matrix.row(out_row);
-            for in_row in 0..rows_in {
-                values[out_row * rows_in + in_row] = row[in_row] as f64;
-            }
+impl<'a> PreparedF64<'a> {
+    /// **Owned** copy of `matrix`'s contiguous panel — for small operands that
+    /// must be stored away from their source (the resp1 digit DB; the
+    /// interpolation matrix DB if ever decoupled).
+    pub(crate) fn new(matrix: &CoeffMatrix) -> PreparedF64<'static> {
+        PreparedF64 {
+            values: Cow::Owned(matrix.flat().to_vec()),
+            rows_out: matrix.rows_out(),
+            rows_in: matrix.rows_in(),
         }
-        Self {
-            values,
-            rows_out,
-            rows_in,
+    }
+
+    /// **Zero-copy view** over `matrix`'s contiguous panel — for the recursion DB,
+    /// which already lives in `self.database`, so no second copy is materialized.
+    pub(crate) fn from_matrix(matrix: &'a CoeffMatrix) -> Self {
+        PreparedF64 {
+            values: Cow::Borrowed(matrix.flat()),
+            rows_out: matrix.rows_out(),
+            rows_in: matrix.rows_in(),
         }
+    }
+
+    /// Widens the `i16` panel into `dst` (resized to `rows_out·rows_in`) as the
+    /// `f64` GEMM operand. `dst` is reused across panels so the peak `f64`
+    /// footprint is one panel per worker, not the whole prepared cache.
+    fn widen_into(&self, dst: &mut Vec<f64>) {
+        dst.resize(self.values.len(), 0.0);
+        widen_i16_to_f64(&self.values, dst);
+    }
+}
+
+/// `dst[i] = src[i] as f64`, AVX2-accelerated when available (the AVX backend
+/// this crate runs on guarantees AVX2; the scalar path is a portability floor).
+fn widen_i16_to_f64(src: &[i16], dst: &mut [f64]) {
+    debug_assert_eq!(src.len(), dst.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: avx2 confirmed at runtime; lengths checked equal above.
+            unsafe { widen_i16_to_f64_avx2(src, dst) };
+            return;
+        }
+    }
+    for (d, &s) in dst.iter_mut().zip(src) {
+        *d = s as f64;
+    }
+}
+
+/// AVX2 i16→f64: 8 lanes/iteration via `cvtepi16_epi32` then two `cvtepi32_pd`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn widen_i16_to_f64_avx2(src: &[i16], dst: &mut [f64]) {
+    use std::arch::x86_64::*;
+    let n = src.len();
+    let sp = src.as_ptr();
+    let dp = dst.as_mut_ptr();
+    let mut i = 0;
+    while i + 8 <= n {
+        // 8 × i16 → 8 × i32 (sign-extended)
+        let v16 = unsafe { _mm_loadu_si128(sp.add(i).cast::<__m128i>()) };
+        let v32 = _mm256_cvtepi16_epi32(v16);
+        // 8 × i32 → two lanes of 4 × f64
+        let lo = _mm256_castsi256_si128(v32);
+        let hi = _mm256_extracti128_si256::<1>(v32);
+        let f_lo = _mm256_cvtepi32_pd(lo);
+        let f_hi = _mm256_cvtepi32_pd(hi);
+        unsafe {
+            _mm256_storeu_pd(dp.add(i), f_lo);
+            _mm256_storeu_pd(dp.add(i + 4), f_hi);
+        }
+        i += 8;
+    }
+    while i < n {
+        unsafe { *dp.add(i) = *sp.add(i) as f64 };
+        i += 1;
     }
 }
 
@@ -198,10 +262,12 @@ fn accumulate_mask_range(
     lwe_n: usize,
     range: std::ops::Range<usize>,
 ) {
+    let mut wide: Vec<f64> = Vec::new();
     for bc in range {
         let u = &prepared[bc];
         let rhs = &masks[bc];
-        gemm_f64_add(acc, &u.values, &rhs.values, rows_out, u.rows_in, lwe_n);
+        u.widen_into(&mut wide);
+        gemm_f64_add(acc, &wide, &rhs.values, rows_out, u.rows_in, lwe_n);
     }
 }
 
@@ -321,8 +387,9 @@ pub(super) fn full_torus_f64_body_product<BE>(
         assert_eq!(u.rows_out, rows_out, "body product output rows mismatch");
         rhs.resize(u.rows_in, 0.0);
         decode_torus_body_f64(&mut rhs, body.data(), u.rows_in, body_base2k, torus_bits);
-        // GEMV `acc += U * b` (single RHS column).
-        gemm_f64_add(&mut acc, &u.values, &rhs, u.rows_out, u.rows_in, 1);
+        // GEMV `acc += U * b`: read `U` as i16 and widen in-register (no 32 MiB
+        // f64 panel materialized) — the memory-bound online win.
+        gemv_i16_f64_add(&mut acc, &u.values, &rhs, u.rows_out, u.rows_in);
     }
 
     encode_torus_body_f64::<BE>(out, out_base2k, &acc, rows_out, torus_bits);
@@ -384,6 +451,83 @@ fn gemm_f64_add(dst: &mut [f64], lhs: &[f64], rhs: &[f64], m: usize, k: usize, n
             (&raw const alpha).cast(),
             1,
         );
+    }
+}
+
+/// GEMV `acc[i] += sum_j U[i][j] * b[j]`, reading the `rows_out × rows_in`
+/// contraction operand `U` as row-major **`i16`** and widening to `f64`
+/// **in-register** (never materializing the f64 panel). This is the
+/// memory-bound online body product, so reading `U` as i16 (¼ the bytes) is the
+/// win; AVX2+FMA path when available, scalar floor otherwise.
+///
+/// Determinism: the SIMD accumulation order differs from `private-gemm`, so the
+/// result is *cryptographically equivalent* (a few f64 ulps, far below the torus
+/// rounding margin and FHE noise floor), not byte-identical — same relaxation as
+/// the M3 mask-product tiling. `PIR_THREADS`-independent.
+fn gemv_i16_f64_add(acc: &mut [f64], u: &[i16], b: &[f64], rows_out: usize, rows_in: usize) {
+    debug_assert_eq!(u.len(), rows_out * rows_in);
+    debug_assert_eq!(b.len(), rows_in);
+    debug_assert_eq!(acc.len(), rows_out);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        {
+            // SAFETY: avx2+fma confirmed; lengths checked above.
+            unsafe { gemv_i16_f64_add_avx2(acc, u, b, rows_out, rows_in) };
+            return;
+        }
+    }
+    for (i, a) in acc.iter_mut().enumerate() {
+        let row = &u[i * rows_in..i * rows_in + rows_in];
+        let mut s = 0.0f64;
+        for (&uij, &bj) in row.iter().zip(b) {
+            s += uij as f64 * bj;
+        }
+        *a += s;
+    }
+}
+
+/// AVX2+FMA body of [`gemv_i16_f64_add`]: per row, load 8 × i16, widen to two
+/// `__m256d` lanes in-register, FMA against `b`, then horizontal-sum.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn gemv_i16_f64_add_avx2(
+    acc: &mut [f64],
+    u: &[i16],
+    b: &[f64],
+    rows_out: usize,
+    rows_in: usize,
+) {
+    use std::arch::x86_64::*;
+    let bp = b.as_ptr();
+    for i in 0..rows_out {
+        let row = unsafe { u.as_ptr().add(i * rows_in) };
+        let mut acc0 = _mm256_setzero_pd();
+        let mut acc1 = _mm256_setzero_pd();
+        let mut j = 0;
+        while j + 8 <= rows_in {
+            let v16 = unsafe { _mm_loadu_si128(row.add(j).cast::<__m128i>()) };
+            let v32 = _mm256_cvtepi16_epi32(v16);
+            let lo = _mm256_cvtepi32_pd(_mm256_castsi256_si128(v32));
+            let hi = _mm256_cvtepi32_pd(_mm256_extracti128_si256::<1>(v32));
+            let b0 = unsafe { _mm256_loadu_pd(bp.add(j)) };
+            let b1 = unsafe { _mm256_loadu_pd(bp.add(j + 4)) };
+            acc0 = _mm256_fmadd_pd(lo, b0, acc0);
+            acc1 = _mm256_fmadd_pd(hi, b1, acc1);
+            j += 8;
+        }
+        // Horizontal sum of the 8 partial lanes.
+        let summed = _mm256_add_pd(acc0, acc1);
+        let lo128 = _mm256_castpd256_pd128(summed);
+        let hi128 = _mm256_extractf128_pd::<1>(summed);
+        let pair = _mm_add_pd(lo128, hi128);
+        let mut s = _mm_cvtsd_f64(_mm_add_sd(pair, _mm_unpackhi_pd(pair, pair)));
+        // Scalar tail.
+        while j < rows_in {
+            s += unsafe { *row.add(j) as f64 * *bp.add(j) };
+            j += 1;
+        }
+        unsafe { *acc.as_mut_ptr().add(i) += s };
     }
 }
 
@@ -545,15 +689,15 @@ mod mask_product_tests {
         ((*state >> 11) as f64) / ((1u64 << 53) as f64)
     }
 
-    fn synthetic(k: usize, rows_out: usize, rows_in: usize, lwe_n: usize) -> (Vec<PreparedF64>, Vec<QueryMask>) {
+    fn synthetic(k: usize, rows_out: usize, rows_in: usize, lwe_n: usize) -> (Vec<PreparedF64<'static>>, Vec<QueryMask>) {
         let mut s = 0x1234_5678_9abc_def0u64;
         let prepared = (0..k)
             .map(|_| {
                 // U entries are centered i16-range integers (the database operand).
-                let values: Vec<f64> = (0..rows_out * rows_in)
-                    .map(|_| (prng(&mut s) * 65536.0 - 32768.0).round())
+                let values: Vec<i16> = (0..rows_out * rows_in)
+                    .map(|_| (prng(&mut s) * 65536.0 - 32768.0).round() as i16)
                     .collect();
-                PreparedF64 { values, rows_out, rows_in }
+                PreparedF64 { values: super::Cow::Owned(values), rows_out, rows_in }
             })
             .collect();
         let masks = (0..k)
