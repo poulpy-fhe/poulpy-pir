@@ -134,7 +134,7 @@ where
     let mut coeff_cts = Vec::with_capacity(t);
     let mut plaintext = module.glwe_plaintext_alloc_from_infos(&glwe_infos);
     for values in &coeff_values {
-        encoder.encode_vec_i64(&mut plaintext.data, base2k, 0, values);
+        encoder.encode_vec_i64(plaintext.data_mut(), base2k, 0, values);
 
         let mut ct = module.glwe_alloc_from_infos(&glwe_infos);
         module.glwe_encrypt_sk(
@@ -172,7 +172,7 @@ where
 
         let mut want_pt: GLWEPlaintext<BE::OwnedBuf> =
             module.glwe_plaintext_alloc_from_infos(&glwe_infos);
-        encoder.encode_vec_i64(&mut want_pt.data, base2k, 0, &expected[point]);
+        encoder.encode_vec_i64(want_pt.data_mut(), base2k, 0, &expected[point]);
         let noise_log2 = module
             .glwe_noise(&res, &want_pt, &sk_prepared, &mut scratch.borrow())
             .std()
@@ -184,7 +184,7 @@ where
         module.glwe_decrypt(&res, &mut got_pt, &sk_prepared, &mut scratch.borrow());
 
         let mut decoded = vec![0i64; n];
-        encoder.decode_vec_i64(&got_pt.data, base2k, 0, &mut decoded);
+        encoder.decode_vec_i64(got_pt.data(), base2k, 0, &mut decoded);
         assert_eq!(decoded, expected[point], "encrypted Horner at w^{point}");
     }
 }

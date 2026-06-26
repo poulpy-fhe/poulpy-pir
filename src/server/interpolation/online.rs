@@ -4,7 +4,8 @@
 use std::time::{Duration, Instant};
 
 use poulpy_core::layouts::{
-    GLWE, GLWECompressed, GLWEInfos, GLWEToBackendMut, GLWEToBackendRef, ModuleCoreAlloc,
+    GLWE, GLWECompressed, GLWEDecompress, GLWEInfos, GLWEToBackendMut, GLWEToBackendRef,
+    ModuleCoreAlloc,
 };
 use poulpy_hal::{
     api::{ScratchOwnedAlloc, ScratchOwnedBorrow},
@@ -32,7 +33,7 @@ use crate::{
 impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Server<BE, P>
 where
     BE: poulpy_cpu_ref::reference::fft64::reim::ReimArith,
-    Module<BE>: InterpolationServerModule<BE>,
+    Module<BE>: InterpolationServerModule<BE> + GLWEDecompress<Backend = BE>,
     ScratchOwned<BE>: ScratchOwnedAlloc<BE> + ScratchOwnedBorrow<BE>,
     VecZnx<Vec<u8>>:
         VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE> + poulpy_hal::layouts::ZnxInfos,

@@ -1,5 +1,5 @@
 use poulpy_core::{
-    EncryptionLayout, GGSWEncryptSk, GLWECompressedEncryptSk, GLWEDecrypt, GLWENoise,
+    EncryptionLayout, GGSWCompressedEncryptSk, GLWECompressedEncryptSk, GLWEDecrypt, GLWENoise,
     layouts::{
         BackendGLWESecretPrepared, Degree, GLWESecret, GLWESecretPreparedFactory, LWESecret, ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank, SecretConversion, TorusPrecision
     },
@@ -59,7 +59,7 @@ where
         + PackingKeysGenerate<BE>
         + GLWECompressedEncryptSk<BE>
         + GLWEDecrypt<BE>
-        + GGSWEncryptSk<BE>,
+        + GGSWCompressedEncryptSk<BE>,
     ScratchOwned<BE>: ScratchOwnedAlloc<BE>,
 {
     fn default() -> Self {
@@ -86,7 +86,7 @@ where
         + PackingKeysGenerate<BE>
         + GLWECompressedEncryptSk<BE>
         + GLWEDecrypt<BE>
-        + GGSWEncryptSk<BE>
+        + GGSWCompressedEncryptSk<BE>
         + ScalarZnxAutomorphismBackend<BE>,
     ScratchOwned<BE>: ScratchOwnedAlloc<BE> + ScratchOwnedBorrow<BE>,
     for<'b> BE::BufRef<'b>: HostDataRef,
@@ -236,7 +236,7 @@ where
                 let mut out = vec![0i64; params.n()];
                 params
                     .encoder()
-                    .decode_vec_i64(&pt.data, params.base2k(), 0, &mut out);
+                    .decode_vec_i64(pt.data(), params.base2k(), 0, &mut out);
                 out
             }
             Response::Recursion(response) => {
@@ -297,7 +297,7 @@ where
 
                 let mut expected = module.glwe_plaintext_alloc_from_infos(&params.glwe_pack());
                 params.encoder().encode_vec_i64(
-                    &mut expected.data,
+                    expected.data_mut(),
                     params.base2k(),
                     0,
                     &expected_values,
@@ -436,13 +436,13 @@ where
                     OneHotEncoding::ModP => {
                         if idx >= start && idx < start + width {
                             params.encoder().encode_one_hot_into(
-                                &mut query_pt.data,
+                                query_pt.data_mut(),
                                 params.matmul_base2k(),
                                 0,
                                 idx - start,
                             );
                         } else {
-                            params.encoder().encode_zero_into(&mut query_pt.data, 0);
+                            params.encoder().encode_zero_into(query_pt.data_mut(), 0);
                         }
                     }
                     OneHotEncoding::Native { precision } => {
@@ -540,12 +540,12 @@ fn client_scratch_bytes<BE: Backend, P: Payload<[u8; 32]>>(
 ) -> usize
 where
     Module<BE>:
-        PackingKeysGenerate<BE> + GLWECompressedEncryptSk<BE> + GLWEDecrypt<BE> + GGSWEncryptSk<BE>,
+        PackingKeysGenerate<BE> + GLWECompressedEncryptSk<BE> + GLWEDecrypt<BE> + GGSWCompressedEncryptSk<BE>,
 {
     let module = params.module();
     module
         .pack_keys_generate_tmp_bytes(&params.key_layout())
         .max(module.glwe_compressed_encrypt_sk_tmp_bytes(&params.glwe_query()))
-        .max(module.ggsw_encrypt_sk_tmp_bytes(&params.ggsw_layout()))
+        .max(module.ggsw_compressed_encrypt_sk_tmp_bytes(&params.ggsw_layout()))
         .max(module.glwe_decrypt_tmp_bytes(&params.glwe_pack()))
 }

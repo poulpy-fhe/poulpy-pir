@@ -9,7 +9,7 @@ use poulpy_core::{
     EncryptionInfos, GLWEAutomorphismKeyCompressedEncryptSk, GLWEMaskFillDefault,
     ScratchArenaTakeCore,
     layouts::{
-        GGLWE, GGLWEAtViewMut, GGLWEAtViewRef, GGLWECompressedSeed, GGLWEInfos, GGLWELayout,
+        GGLWE, GGLWEAtViewMut, GGLWEBackendRef, GGLWECompressedSeed, GGLWEInfos, GGLWELayout,
         GGLWEPreparedFactory, GGLWEToBackendMut, GGLWEToBackendRef, GLWEAutomorphismKeyCompressed,
         GLWESecret, GLWESecretToBackendMut, GLWEToBackendMut, GLWEToBackendRef, GetGaloisElement,
         LWEInfos, LWESecretToBackendRef, ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank,
@@ -422,8 +422,8 @@ where
     K: GGLWECompressedToBackendRef<BE> + GGLWEInfos,
 {
     let key_ref = key.to_backend_ref();
-    let body_ref = key_ref.body_as_gglwe();
-    let split = split_output_key_plain(module, &&body_ref, 0, rotation);
+    let body = GGLWEBackendRef::from_inner(key_ref.body_as_gglwe());
+    let split = split_output_key_plain(module, &body, 0, rotation);
     let mut prepared = module.gglwe_prepared_alloc_from_infos(&split);
     module.gglwe_prepare(&mut prepared, &split, &mut scratch.borrow());
     prepared
@@ -584,9 +584,9 @@ where
     );
 }
 
-fn split_output_key_plain<BE, K>(
+fn split_output_key_plain<BE>(
     module: &Module<BE>,
-    key: &K,
+    key: &GGLWEBackendRef<'_, BE>,
     output_col: usize,
     rotation: i64,
 ) -> GGLWE<BE::OwnedBuf>
@@ -595,7 +595,6 @@ where
     Module<BE>: ModuleCoreAlloc<OwnedBuf = BE::OwnedBuf>
         + VecZnxAutomorphismBackend<BE>
         + VecZnxCopyBackend<BE>,
-    K: GGLWEAtViewRef<BE> + GGLWEInfos,
 {
     let mut split = module.gglwe_alloc(
         key.base2k(),
@@ -608,7 +607,7 @@ where
 
     for row in 0..key.dnum().as_usize() {
         for col in 0..key.rank_in().as_usize() {
-            let src = GGLWEAtViewRef::<BE>::at_view(key, row, col);
+            let src = key.at_view(row, col);
             let mut dst = GGLWEAtViewMut::<BE>::at_view_mut(&mut split, row, col);
             let src_ref = src.to_backend_ref();
             let mut dst_mut = dst.to_backend_mut();

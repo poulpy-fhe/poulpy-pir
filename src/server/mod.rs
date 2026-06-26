@@ -50,7 +50,7 @@ use api::{InterpolationServerModule, RecursionServerModule};
 pub use interpolation::InterpolationPrecomputation;
 use interpolation::InterpolationState;
 use recursion::RecursionState;
-pub(crate) use recursion::{RecursionKeys, generate_recursion_key};
+pub(crate) use recursion::{CompressedKey, RecursionKeys, generate_recursion_key, qtilde_bits};
 pub use recursion::{RecursionPrecomputation, RecursionQuery};
 
 /// One measured OFFLINE phase.
@@ -280,6 +280,14 @@ pub struct Server<BE: Backend, P: Payload<[u8; 32]>> {
     scratch_pool: Vec<ScratchOwned<BE>>,
     collapse: ServerCollapse<BE, P>,
     precomputation: ServerPrecomputation<BE>,
+}
+
+impl<BE: Backend, P: Payload<[u8; 32]>> Server<BE, P> {
+    /// The shared cryptosystem parameters (used, e.g., to size a received
+    /// [`Query`] in [`Query::read_from`]).
+    pub fn params(&self) -> &Parameters<BE, [u8; 32], P> {
+        &self.params
+    }
 }
 
 #[allow(private_bounds)]

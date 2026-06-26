@@ -12,11 +12,11 @@
 //! query type — there is deliberately no shared trait.
 
 use poulpy_core::{
-    GGSWEncryptSk,
+    GGSWCompressedEncryptSk,
     layouts::{
-        GGSW, GGSWInfos, GGSWPrepared, GGSWPreparedFactory, GGSWPreparedToBackendRef, GLWE,
-        GLWEAutomorphismKeyCompressed, GLWEInfos, GLWEToBackendMut, GLWEToBackendRef,
-        ModuleCoreAlloc,
+        GGSWCompressed, GGSWDecompress, GGSWInfos, GGSWPrepared, GGSWPreparedFactory,
+        GGSWPreparedToBackendRef, GLWE, GLWEAutomorphismKeyCompressed, GLWEDecompress, GLWEInfos,
+        GLWEToBackendMut, GLWEToBackendRef, ModuleCoreAlloc, ModuleCoreCompressedAlloc,
     },
 };
 use poulpy_hal::{
@@ -118,7 +118,9 @@ impl<BE: Backend> InterpolationKeys<BE> {
 pub struct InterpolationQuery<BE: Backend> {
     pub common: QueryCommon<BE>,
     pub(crate) keys: InterpolationKeys<BE>,
-    pub root: GGSW<BE::OwnedBuf>,
+    /// Seed-compressed GGSW root `Enc(X^i)`: only the body is generated and
+    /// transmitted; the server regenerates the public mask `a` from the seed.
+    pub root: GGSWCompressed<BE::OwnedBuf>,
 }
 
 /// The interpolation server response: one packed GLWE holding the selected
@@ -330,21 +332,28 @@ impl Interpolation {
         scratch: &mut ScratchOwned<BE>,
     ) -> InterpolationQuery<BE>
     where
-        Module<BE>: ModuleN + ModuleCoreAlloc<OwnedBuf = Vec<u8>> + GGSWEncryptSk<BE>,
+        Module<BE>: ModuleN
+            + ModuleCoreAlloc<OwnedBuf = Vec<u8>>
+            + ModuleCoreCompressedAlloc
+            + GGSWCompressedEncryptSk<BE>,
         ScratchOwned<BE>: ScratchOwnedBorrow<BE>,
         for<'b> BE::BufRef<'b>: HostDataRef,
         for<'b> BE::BufMut<'b>: HostDataMut,
     {
         let exponent = interpolation_root_exponent(module.n(), addr.matrix, self.interpolation_t);
         let root_pt = root_monomial(module, exponent);
-        let mut root = module.ggsw_alloc_from_infos(&self.ggsw_layout);
-        module.ggsw_encrypt_sk(
+        // Seed-compressed root: the public mask `a` is derived from `root_a` (the
+        // CRS the server already pre-processes), so only the body is generated and
+        // transmitted; the server regenerates `a` from the stored seed.
+        let seed_xa = ctx.source_xa.new_seed();
+        let mut root = module.ggsw_compressed_alloc_from_infos(&self.ggsw_layout);
+        module.ggsw_compressed_encrypt_sk(
             &mut root,
             &root_pt,
             &ctx.sk_pack_prep,
+            seed_xa,
             &self.ggsw_layout,
             &mut ctx.source_xe,
-            &mut ctx.source_xa,
             &mut scratch.borrow(),
         );
         // Take the full-packing keys the client generated and forwarded.
@@ -352,19 +361,24 @@ impl Interpolation {
         InterpolationQuery { common, keys, root }
     }
 
-    /// Prepare the received GGSW root for the Horner evaluation.
+    /// Prepare the received seed-compressed GGSW root for the Horner evaluation:
+    /// regenerate the public mask from the seed, then prepare as usual.
     pub fn prepare_root<BE: Backend<OwnedBuf = Vec<u8>>>(
         &self,
         module: &Module<BE>,
-        root: &GGSW<BE::OwnedBuf>,
+        root: &GGSWCompressed<BE::OwnedBuf>,
         scratch: &mut ScratchOwned<BE>,
     ) -> GGSWPrepared<BE::OwnedBuf, BE>
     where
-        Module<BE>: GGSWPreparedFactory<BE>,
+        Module<BE>: GGSWPreparedFactory<BE>
+            + ModuleCoreAlloc<OwnedBuf = Vec<u8>>
+            + GLWEDecompress<Backend = BE>,
         ScratchOwned<BE>: ScratchOwnedBorrow<BE>,
     {
-        let mut prepared = module.ggsw_prepared_alloc_from_infos(root);
-        module.ggsw_prepare(&mut prepared, root, &mut scratch.borrow());
+        let mut decompressed = module.ggsw_alloc_from_infos(root);
+        module.decompress_ggsw(&mut decompressed, root);
+        let mut prepared = module.ggsw_prepared_alloc_from_infos(&decompressed);
+        module.ggsw_prepare(&mut prepared, &decompressed, &mut scratch.borrow());
         prepared
     }
 
