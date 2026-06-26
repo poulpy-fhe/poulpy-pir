@@ -6,10 +6,13 @@ edition = "2024"
 [dependencies]
 getrandom = "0.4"
 private-gemm-x86 = { version = "=0.1.20", default-features = false }
-poulpy-core = { path = "../poulpy/poulpy-core" }
-poulpy-hal = { path = "../poulpy/poulpy-hal" }
-poulpy-cpu-ref = { path = "../poulpy/poulpy-cpu-ref", features = ["enable-core"] }
-poulpy-cpu-avx = { path = "../poulpy/poulpy-cpu-avx", features = ["enable-avx"] }
+# Pinned: poulpy-pir is adapted to this exact poulpy commit. Pinning isolates it
+# from poulpy `main` drift; bump the rev deliberately when migrating to a newer
+# poulpy (and update poulpy-pir to match its API).
+poulpy-core = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed" }
+poulpy-hal = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed" }
+poulpy-cpu-ref = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed", features = ["enable-core"] }
+poulpy-cpu-avx = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed", features = ["enable-avx"] }
 
 [[bench]]
 name = "packing"
