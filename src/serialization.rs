@@ -62,7 +62,9 @@ use poulpy_core::layouts::{
     ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank, SetGaloisElement,
 };
 use poulpy_hal::{
-    api::{ModuleN, ScratchOwnedAlloc, ScratchOwnedBorrow, VecZnxNormalize, VecZnxNormalizeTmpBytes},
+    api::{
+        ModuleN, ScratchOwnedAlloc, ScratchOwnedBorrow, VecZnxNormalize, VecZnxNormalizeTmpBytes,
+    },
     layouts::{
         Backend, HostDataMut, HostDataRef, Module, ReaderFrom, ScratchOwned, VecZnx,
         VecZnxToBackendMut, VecZnxToBackendRef, WriterTo, ZnxView, ZnxViewMut,
@@ -319,7 +321,7 @@ where
                 dense.read_from(reader)?;
                 let mut work = ctx.module.glwe_alloc_from_infos(&entry_working);
                 ctx.module
-                .glwe_normalize(&mut work, &dense, &mut ctx.scratch.borrow());
+                    .glwe_normalize(&mut work, &dense, &mut ctx.scratch.borrow());
                 let mut view = body.at_view_mut(row, col);
                 copy_vec_znx_host(view.data_mut(), work.data());
             }
@@ -564,7 +566,9 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>> Response<BE> {
             TAG_INTERPOLATION => {
                 let glwe_pack = params.glwe_pack();
                 let selected = read_glwe(&mut ctx, reader, &glwe_pack)?;
-                Ok(Response::Interpolation(InterpolationResponse::new(selected)))
+                Ok(Response::Interpolation(InterpolationResponse::new(
+                    selected,
+                )))
             }
             TAG_RECURSION => {
                 let qtilde_infos =
@@ -685,7 +689,7 @@ where
                 dense.read_from(reader)?;
                 let mut work = ctx.module.glwe_alloc_from_infos(&entry_working);
                 ctx.module
-                .glwe_normalize(&mut work, &dense, &mut ctx.scratch.borrow());
+                    .glwe_normalize(&mut work, &dense, &mut ctx.scratch.borrow());
                 let mut view = body.at_view_mut(row, col);
                 copy_vec_znx_host(view.data_mut(), work.data());
             }
@@ -803,10 +807,8 @@ pub(crate) fn response_component_sizes<BE: Backend<OwnedBuf = Vec<u8>>>(
     module: &Module<BE>,
 ) -> Vec<(&'static str, usize)>
 where
-    Module<BE>: ModuleN
-        + ModuleCoreAlloc<OwnedBuf = Vec<u8>>
-        + GLWENormalize<BE>
-        + VecZnxNormalizeTmpBytes,
+    Module<BE>:
+        ModuleN + ModuleCoreAlloc<OwnedBuf = Vec<u8>> + GLWENormalize<BE> + VecZnxNormalizeTmpBytes,
     ScratchOwned<BE>: ScratchOwnedAlloc<BE> + ScratchOwnedBorrow<BE>,
     GLWE<Vec<u8>>: GLWEToBackendMut<BE> + GLWEToBackendRef<BE>,
     for<'b> BE::BufRef<'b>: HostDataRef,

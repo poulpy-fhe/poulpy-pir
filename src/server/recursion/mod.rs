@@ -30,9 +30,7 @@ use std::time::Duration;
 use crate::{
     packing::{PackingKeys, PackingPrecomputations},
     payload::Payload,
-    server::{
-        Server, ServerCollapse, common::PreparedF64, common::QueryMask,
-    },
+    server::{Server, ServerCollapse, common::PreparedF64, common::QueryMask},
 };
 
 pub use keys::RecursionQuery;
@@ -124,5 +122,4 @@ impl<BE: Backend, P: Payload<[u8; 32]>> Server<BE, P> {
         };
         state
     }
-
 }

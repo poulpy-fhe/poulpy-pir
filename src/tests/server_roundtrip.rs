@@ -4,7 +4,7 @@ use poulpy_cpu_avx::FFT64Avx;
 
 use crate::{
     client::{Client, Response},
-    config::{Collapse, Config, INSPIRE_INT_32B},
+    config::{Collapse, Config, DefaultPirParameters32B, DEFAULT_BASE2K, DEFAULT_K, DEFAULT_N},
     database::DatabaseLayout,
     payload::{U256P65535, U256P65536},
     server::Server,
@@ -21,9 +21,9 @@ type Layout = DatabaseLayout<U256P65535>;
 #[test]
 fn server_client_roundtrip_interpolation_generic_u256_chunked() {
     let config = Config::<[u8; 32], U256P65535> {
-        n: 2048,
-        base2k: 18,
-        k: 54,
+        n: DEFAULT_N,
+        base2k: DEFAULT_BASE2K,
+        k: DEFAULT_K,
         collapse: Collapse::Interpolation,
         _phantom: PhantomData,
     };
@@ -58,7 +58,10 @@ fn server_client_roundtrip_interpolation_generic_u256_chunked() {
 
 #[test]
 fn server_client_roundtrip_full_u256() {
-    let config = INSPIRE_INT_32B;
+    let config = DefaultPirParameters32B::InspireInt1GiB
+        .interpolation()
+        .expect("InspireInt1GiB must resolve to interpolation params")
+        .config;
     let n = config.n();
     let layout = Layout::new(2 * n, n);
 
@@ -96,8 +99,8 @@ fn server_client_roundtrip_full_u256() {
 fn server_client_roundtrip_recursion_generic_u256_chunked() {
     let config = Config::<[u8; 32], U256P65536> {
         n: 64,
-        base2k: 18,
-        k: 54,
+        base2k: DEFAULT_BASE2K,
+        k: DEFAULT_K,
         collapse: Collapse::Recursion {
             gamma0: 32,
             gamma1: 32,

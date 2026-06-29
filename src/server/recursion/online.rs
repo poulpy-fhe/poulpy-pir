@@ -25,7 +25,9 @@ use crate::{
     },
 };
 
-use super::{CompressedKey, KeyBundle, RecursionQuery, packing::pack_bodies_pooled, qtilde_bits, tau};
+use super::{
+    CompressedKey, KeyBundle, RecursionQuery, packing::pack_bodies_pooled, qtilde_bits, tau,
+};
 
 #[allow(private_bounds)]
 impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Server<BE, P>

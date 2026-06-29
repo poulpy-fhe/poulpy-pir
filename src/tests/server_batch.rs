@@ -7,7 +7,7 @@ use poulpy_cpu_avx::FFT64Avx;
 
 use crate::{
     client::{Client, Response},
-    config::{Collapse, Config, INSPIRE_INT_32B},
+    config::{Collapse, Config, DefaultPirParameters32B, DEFAULT_BASE2K, DEFAULT_K},
     database::DatabaseLayout,
     payload::{U256P65535, U256P65536},
     server::{Query, Server},
@@ -23,7 +23,10 @@ type Layout = DatabaseLayout<U256P65535>;
 // Full n=2048 FHE end-to-end: run with `--release`.
 #[test]
 fn batch_interpolation_matches_per_query() {
-    let config = INSPIRE_INT_32B;
+    let config = DefaultPirParameters32B::InspireInt1GiB
+        .interpolation()
+        .expect("InspireInt1GiB must resolve to interpolation params")
+        .config;
     let n = config.n();
     let layout = Layout::new(2 * n, n);
 
@@ -67,14 +70,14 @@ fn batch_interpolation_matches_per_query() {
     let batch_responses = server.respond_batch(&queries);
     assert_eq!(batch_responses.len(), items.len());
 
-    for (i, ((response, state), &item)) in batch_responses
-        .iter()
-        .zip(&states)
-        .zip(&items)
-        .enumerate()
+    for (i, ((response, state), &item)) in
+        batch_responses.iter().zip(&states).zip(&items).enumerate()
     {
         let got = client.decode(response, state);
-        assert_eq!(got, payloads[item], "batch item {i} (index {item}) decoded wrong");
+        assert_eq!(
+            got, payloads[item],
+            "batch item {i} (index {item}) decoded wrong"
+        );
         assert_eq!(
             got, per_query[i],
             "batch item {i} (index {item}) differs from per-query answer"
@@ -86,7 +89,10 @@ fn batch_interpolation_matches_per_query() {
 /// delegates the GEMM to the memory-bound GEMV).
 #[test]
 fn batch_interpolation_single_element() {
-    let config = INSPIRE_INT_32B;
+    let config = DefaultPirParameters32B::InspireInt1GiB
+        .interpolation()
+        .expect("InspireInt1GiB must resolve to interpolation params")
+        .config;
     let n = config.n();
     let layout = Layout::new(2 * n, n);
     let item = 300_000usize;
@@ -114,8 +120,8 @@ fn batch_interpolation_single_element() {
 fn batch_recursion_fallback_matches_per_query() {
     let config = Config::<[u8; 32], U256P65536> {
         n: 64,
-        base2k: 18,
-        k: 54,
+        base2k: DEFAULT_BASE2K,
+        k: DEFAULT_K,
         collapse: Collapse::Recursion {
             gamma0: 32,
             gamma1: 32,
@@ -158,6 +164,9 @@ fn batch_recursion_fallback_matches_per_query() {
     assert_eq!(responses.len(), items.len());
     for ((response, state), &item) in responses.iter().zip(&states).zip(&items) {
         let got = client.decode(response, state);
-        assert_eq!(got, payloads[&item], "recursion batch item {item} decoded wrong");
+        assert_eq!(
+            got, payloads[&item],
+            "recursion batch item {item} decoded wrong"
+        );
     }
 }

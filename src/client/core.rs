@@ -1,8 +1,9 @@
 use poulpy_core::{
-    EncryptionLayout, GGSWCompressedEncryptSk, GLWECompressedEncryptSk, GLWEDecrypt, GLWENoise,
     layouts::{
-        BackendGLWESecretPrepared, Degree, GLWESecret, GLWESecretPreparedFactory, LWESecret, ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank, SecretConversion, TorusPrecision
+        BackendGLWESecretPrepared, Degree, GLWESecret, GLWESecretPreparedFactory, LWESecret,
+        ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank, SecretConversion, TorusPrecision,
     },
+    EncryptionLayout, GGSWCompressedEncryptSk, GLWECompressedEncryptSk, GLWEDecrypt, GLWENoise,
 };
 use poulpy_hal::{
     api::{
@@ -16,14 +17,14 @@ use poulpy_hal::{
 };
 
 use crate::{
-    config::{Collapse, Config, INSPIRE_INT_32B},
+    config::{Collapse, Config, DefaultPirParameters32B},
     database::{DatabaseLayout, PayloadAddress},
     interpolation::{Interpolation, InterpolationKeys},
-    packing::PackingKeysGenerate,
     packing::recursion::qtilde_glwe_layout,
+    packing::PackingKeysGenerate,
     parameters::Parameters,
-    payload::{P65535, Payload},
-    server::{Query, RecursionKeys, RecursionQuery, generate_recursion_key},
+    payload::{Payload, P65535},
+    server::{generate_recursion_key, Query, RecursionKeys, RecursionQuery},
 };
 
 use super::{
@@ -63,7 +64,10 @@ where
     ScratchOwned<BE>: ScratchOwnedAlloc<BE>,
 {
     fn default() -> Self {
-        let config = INSPIRE_INT_32B;
+        let config = DefaultPirParameters32B::InspireInt1GiB
+            .interpolation()
+            .expect("InspireInt1GiB must resolve to interpolation params")
+            .config;
         let params = config.new::<BE>();
         let layout = DatabaseLayout::<P65535<[u8; 32]>>::new(params.n(), params.n());
         let scratch = ScratchOwned::<BE>::alloc(client_scratch_bytes(&params));
@@ -539,8 +543,10 @@ fn client_scratch_bytes<BE: Backend, P: Payload<[u8; 32]>>(
     params: &Parameters<BE, [u8; 32], P>,
 ) -> usize
 where
-    Module<BE>:
-        PackingKeysGenerate<BE> + GLWECompressedEncryptSk<BE> + GLWEDecrypt<BE> + GGSWCompressedEncryptSk<BE>,
+    Module<BE>: PackingKeysGenerate<BE>
+        + GLWECompressedEncryptSk<BE>
+        + GLWEDecrypt<BE>
+        + GGSWCompressedEncryptSk<BE>,
 {
     let module = params.module();
     module

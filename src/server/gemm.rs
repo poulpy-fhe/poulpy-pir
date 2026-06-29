@@ -84,7 +84,15 @@ pub trait Gemm: Send + Sync {
 pub struct PrivateGemmX86;
 
 impl Gemm for PrivateGemmX86 {
-    fn gemm_f64_add(&self, dst: &mut [f64], lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize) {
+    fn gemm_f64_add(
+        &self,
+        dst: &mut [f64],
+        lhs: &[f64],
+        rhs: &[f64],
+        m: usize,
+        k: usize,
+        n: usize,
+    ) {
         gemm_f64_add(dst, lhs, rhs, m, k, n)
     }
     // gemv_i16_f64_add: provided default is already the AVX2 CPU kernel.
@@ -386,7 +394,9 @@ mod tests {
         };
         for rows_in in [1usize, 7, 8, 9, 15, 16, 17, 23, 24, 31, 33, 64, 1024, 1031] {
             // U: centered i16-range integers (the database operand).
-            let u: Vec<i16> = (0..rows_out * rows_in).map(|_| (next() >> 48) as i16).collect();
+            let u: Vec<i16> = (0..rows_out * rows_in)
+                .map(|_| (next() >> 48) as i16)
+                .collect();
             // b: torus reals in [-0.5, 0.5).
             let b: Vec<f64> = (0..rows_in)
                 .map(|_| (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5)
@@ -420,7 +430,9 @@ mod tests {
                 .wrapping_add(1442695040888963407);
             state
         };
-        let u: Vec<i16> = (0..rows_out * rows_in).map(|_| (next() >> 48) as i16).collect();
+        let u: Vec<i16> = (0..rows_out * rows_in)
+            .map(|_| (next() >> 48) as i16)
+            .collect();
         for n in [1usize, 2, 3, 4, 8, 16] {
             // B: rows_in × n, torus reals in [-0.5, 0.5).
             let b: Vec<f64> = (0..rows_in * n)

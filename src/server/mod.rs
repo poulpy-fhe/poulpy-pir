@@ -437,9 +437,7 @@ where
         if queries.is_empty() {
             return Vec::new();
         }
-        let all_interpolation = queries
-            .iter()
-            .all(|q| matches!(q, Query::Interpolation(_)));
+        let all_interpolation = queries.iter().all(|q| matches!(q, Query::Interpolation(_)));
         if all_interpolation {
             let interp: Vec<&InterpolationQuery<BE>> = queries
                 .iter()

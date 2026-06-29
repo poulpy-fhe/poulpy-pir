@@ -23,10 +23,11 @@ fn main() {
     let (prepared, masks) = synthetic();
     let flops = 2.0 * (K as f64) * (ROWS_OUT as f64) * (ROWS_IN as f64) * (LWE_N as f64);
 
+    println!("mask_product bench (rows_out={ROWS_OUT}, rows_in={ROWS_IN}, lwe_n={LWE_N}, K={K})");
     println!(
-        "mask_product bench (rows_out={ROWS_OUT}, rows_in={ROWS_IN}, lwe_n={LWE_N}, K={K})"
+        "  {:<10}{:>12}{:>12}{:>12}",
+        "threads", "ms", "GFLOP/s", "speedup"
     );
-    println!("  {:<10}{:>12}{:>12}{:>12}", "threads", "ms", "GFLOP/s", "speedup");
 
     let mut base_ms = 0.0;
     for nt in [1usize, 2, 4, 8, 16] {
@@ -39,7 +40,13 @@ fn main() {
             base_ms = ms;
         }
         let gflops = flops / (avg.as_secs_f64() * 1e9);
-        println!("  {:<10}{:>12.3}{:>12.1}{:>12.2}", nt, ms, gflops, base_ms / ms);
+        println!(
+            "  {:<10}{:>12.3}{:>12.1}{:>12.2}",
+            nt,
+            ms,
+            gflops,
+            base_ms / ms
+        );
     }
 }
 
@@ -73,7 +80,9 @@ fn synthetic() -> (Vec<Panel>, Vec<Mask>) {
 }
 
 fn prng(state: &mut u64) -> f64 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     ((*state >> 11) as f64) / ((1u64 << 53) as f64)
 }
 
@@ -111,10 +120,22 @@ fn mask_product_acc(prepared: &[Panel], masks: &[Mask], mask_threads: usize) -> 
     acc
 }
 
-fn accumulate_range(acc: &mut [f64], prepared: &[Panel], masks: &[Mask], range: std::ops::Range<usize>) {
+fn accumulate_range(
+    acc: &mut [f64],
+    prepared: &[Panel],
+    masks: &[Mask],
+    range: std::ops::Range<usize>,
+) {
     for bc in range {
         let u = &prepared[bc];
-        gemm_f64_add(acc, &u.values, &masks[bc].values, u.rows_out, u.rows_in, LWE_N);
+        gemm_f64_add(
+            acc,
+            &u.values,
+            &masks[bc].values,
+            u.rows_out,
+            u.rows_in,
+            LWE_N,
+        );
     }
 }
 

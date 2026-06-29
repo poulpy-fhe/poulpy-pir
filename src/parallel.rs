@@ -224,7 +224,9 @@ mod tests {
 
     /// The canonical panel-major sequential order of every block.
     fn sequential(p: usize, k: usize) -> Vec<(usize, usize)> {
-        (0..p).flat_map(|panel| (0..k).map(move |c| (panel, c))).collect()
+        (0..p)
+            .flat_map(|panel| (0..k).map(move |c| (panel, c)))
+            .collect()
     }
 
     #[test]
@@ -246,13 +248,20 @@ mod tests {
                 assert!(g.len() <= p.min(threads.max(1)).max(1));
                 assert!(g.iter().all(|grp| !grp.is_empty()));
                 // Each tile is a full panel.
-                assert!(g.iter().flatten().all(|w| w.col_start == 0 && w.col_len == k));
+                assert!(
+                    g.iter()
+                        .flatten()
+                        .all(|w| w.col_start == 0 && w.col_len == k)
+                );
                 // Exact cover, panel-major order preserved.
                 assert_eq!(flatten(&g), sequential(p, k), "p={p} k={k} t={threads}");
                 // Panel-count balance within 1.
                 let counts: Vec<usize> = g.iter().map(|grp| grp.len()).collect();
                 let (mn, mx) = (counts.iter().min().unwrap(), counts.iter().max().unwrap());
-                assert!(mx - mn <= 1, "unbalanced panels p={p} t={threads}: {counts:?}");
+                assert!(
+                    mx - mn <= 1,
+                    "unbalanced panels p={p} t={threads}: {counts:?}"
+                );
             }
         }
     }
@@ -274,7 +283,10 @@ mod tests {
                     .filter(|&n| n > 0)
                     .collect();
                 let (mn, mx) = (counts.iter().min().unwrap(), counts.iter().max().unwrap());
-                assert!(mx - mn <= 1, "unbalanced blocks p={p} k={k} t={threads}: {counts:?}");
+                assert!(
+                    mx - mn <= 1,
+                    "unbalanced blocks p={p} k={k} t={threads}: {counts:?}"
+                );
             }
         }
     }

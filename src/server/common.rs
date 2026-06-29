@@ -17,9 +17,7 @@ use std::borrow::Cow;
 
 use poulpy_cpu_ref::reference::fft64::reim::ReimArith;
 
-use crate::{
-    database::CoeffMatrix, parameters::Parameters, payload::Payload, server::gemm::Gemm,
-};
+use crate::{database::CoeffMatrix, parameters::Parameters, payload::Payload, server::gemm::Gemm};
 
 pub(super) fn default_query_mask_tmp_bytes<BE, R, GM>(
     module: &Module<BE>,
@@ -380,7 +378,10 @@ pub(super) fn full_torus_f64_body_product_batch<BE>(
         "output and query-body batch widths differ"
     );
     assert!(q > 0, "cannot run an empty body-product batch");
-    assert!(!prepared.is_empty(), "cannot accumulate an empty body product");
+    assert!(
+        !prepared.is_empty(),
+        "cannot accumulate an empty body product"
+    );
     let nblocks = prepared.len();
     for bodies in bodies_per_query {
         assert_eq!(
@@ -605,11 +606,18 @@ mod mask_product_tests {
 
     /// Deterministic pseudo-random f64 in `[lo, hi)`.
     fn prng(state: &mut u64) -> f64 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*state >> 11) as f64) / ((1u64 << 53) as f64)
     }
 
-    fn synthetic(k: usize, rows_out: usize, rows_in: usize, lwe_n: usize) -> (Vec<PreparedF64<'static>>, Vec<QueryMask>) {
+    fn synthetic(
+        k: usize,
+        rows_out: usize,
+        rows_in: usize,
+        lwe_n: usize,
+    ) -> (Vec<PreparedF64<'static>>, Vec<QueryMask>) {
         let mut s = 0x1234_5678_9abc_def0u64;
         let prepared = (0..k)
             .map(|_| {
@@ -617,14 +625,22 @@ mod mask_product_tests {
                 let values: Vec<i16> = (0..rows_out * rows_in)
                     .map(|_| (prng(&mut s) * 65536.0 - 32768.0).round() as i16)
                     .collect();
-                PreparedF64 { values: super::Cow::Owned(values), rows_out, rows_in }
+                PreparedF64 {
+                    values: super::Cow::Owned(values),
+                    rows_out,
+                    rows_in,
+                }
             })
             .collect();
         let masks = (0..k)
             .map(|_| {
                 // A entries are torus reals in [-0.5, 0.5).
                 let values: Vec<f64> = (0..rows_in * lwe_n).map(|_| prng(&mut s) - 0.5).collect();
-                QueryMask { values, rows: rows_in, cols: lwe_n }
+                QueryMask {
+                    values,
+                    rows: rows_in,
+                    cols: lwe_n,
+                }
             })
             .collect();
         (prepared, masks)

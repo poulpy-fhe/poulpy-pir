@@ -64,7 +64,10 @@ where
         key_stride: usize,
         timings: &mut OfflineTimings,
         phase_names: PackMaskPhaseNames,
-    ) -> (Vec<Vec<PreparedF64<'static>>>, Vec<PackingPrecomputations<BE>>) {
+    ) -> (
+        Vec<Vec<PreparedF64<'static>>>,
+        Vec<PackingPrecomputations<BE>>,
+    ) {
         // OFFLINE: full parallel budget across batches.
         let (prepared, precomputes, durations) = self.precompute_pack_mask_inner(
             all_digits,
@@ -90,7 +93,10 @@ where
         key_stride: usize,
         timings: &mut OnlineTimings,
         phase_names: PackMaskPhaseNames,
-    ) -> (Vec<Vec<PreparedF64<'static>>>, Vec<PackingPrecomputations<BE>>) {
+    ) -> (
+        Vec<Vec<PreparedF64<'static>>>,
+        Vec<PackingPrecomputations<BE>>,
+    ) {
         // ONLINE (resp2): per-query, only `nbatches=2` here — the per-worker scratch
         // alloc + thread spawn dwarfs the tiny work, so run sequentially.
         let (prepared, precomputes, durations) = self.precompute_pack_mask_inner(
@@ -151,8 +157,9 @@ where
             Option<(Vec<PreparedF64<'static>>, PackingPrecomputations<BE>)>,
             [Duration; 4],
         );
-        let mut outputs: Vec<BatchOut<BE>> =
-            (0..nbatches).map(|_| (None, [Duration::default(); 4])).collect();
+        let mut outputs: Vec<BatchOut<BE>> = (0..nbatches)
+            .map(|_| (None, [Duration::default(); 4]))
+            .collect();
 
         let region = Instant::now();
         {
@@ -231,7 +238,10 @@ where
         gamma: usize,
         key: &KeyBundle<'_, BE>,
         timings: &mut OnlineTimings,
-    ) -> (Vec<Vec<PreparedF64<'static>>>, Vec<PackingPrecomputations<BE>>) {
+    ) -> (
+        Vec<Vec<PreparedF64<'static>>>,
+        Vec<PackingPrecomputations<BE>>,
+    ) {
         self.precompute_pack_mask_online_timed(
             all_digits,
             q_masks,
@@ -308,7 +318,11 @@ fn compute_pack_mask_batch<BE>(
     key_mask_source: &GLWEAutomorphismKeyCompressed<BE::OwnedBuf>,
     gemm: &dyn Gemm,
     scratch: &mut ScratchArena<'_, BE>,
-) -> (Vec<PreparedF64<'static>>, PackingPrecomputations<BE>, [Duration; 4])
+) -> (
+    Vec<PreparedF64<'static>>,
+    PackingPrecomputations<BE>,
+    [Duration; 4],
+)
 where
     BE: Backend<OwnedBuf = Vec<u8>> + poulpy_cpu_ref::reference::fft64::reim::ReimArith,
     Module<BE>: RecursionServerModule<BE> + ModuleCoreAlloc<OwnedBuf = Vec<u8>>,
@@ -421,7 +435,13 @@ where
         let mut res_body = module.vec_znx_alloc(1, size);
         let started = Instant::now();
         full_torus_f64_body_product::<BE>(
-            &mut res_body, base2k, row_prep, q_bodies, base2k, torus_bits, gemm,
+            &mut res_body,
+            base2k,
+            row_prep,
+            q_bodies,
+            base2k,
+            torus_bits,
+            gemm,
         );
         body_product += started.elapsed();
         bodies.push(res_body);

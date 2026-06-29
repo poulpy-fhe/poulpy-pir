@@ -1,18 +1,18 @@
 //! Full InsPIRe² double-PIR correctness and the public-API round-trips.
 
-use crate::config::{Collapse, Config};
+use crate::config::{Collapse, Config, DEFAULT_BASE2K, DEFAULT_K};
 use crate::packing::{
-    Packing, PackingKeysGenerate, PackingMaskAggregation,
     recursion::{decompose_digits, partial_pack_batch, qtilde_glwe_layout},
+    Packing, PackingKeysGenerate, PackingMaskAggregation,
 };
 use poulpy_core::{
-    EncryptionLayout, GLWECompressedEncryptSk, GLWEDecrypt, GLWEExpandLWEMatrix, GLWENormalize,
-    LWEMatrixDecrypt,
     layouts::{
         Base2K, Degree, GLWEAutomorphismKeyLayout, GLWEDecompress, GLWELayout,
         GLWESecretPreparedFactory, LWEInfos, LWEMatrixLayout, LWESecret, ModuleCoreAlloc,
         ModuleCoreCompressedAlloc, Rank, SecretConversion, TorusPrecision,
     },
+    EncryptionLayout, GLWECompressedEncryptSk, GLWEDecrypt, GLWEExpandLWEMatrix, GLWENormalize,
+    LWEMatrixDecrypt,
 };
 use poulpy_cpu_avx::FFT64Avx;
 
@@ -418,8 +418,8 @@ fn recursion_api_roundtrip() {
     let num_records = t * cols;
     let config = || Config::<[u8; 32], RawRecordPayload> {
         n: 64,
-        base2k: 18,
-        k: 54,
+        base2k: DEFAULT_BASE2K,
+        k: DEFAULT_K,
         collapse: Collapse::Recursion {
             gamma0,
             gamma1: 32,
@@ -468,8 +468,8 @@ fn recursion_api_roundtrip_larger() {
     let p = 1i64 << k_pt;
     let config = || Config::<[u8; 32], RawRecordPayload> {
         n: 128,
-        base2k: 18,
-        k: 54,
+        base2k: DEFAULT_BASE2K,
+        k: DEFAULT_K,
         collapse: Collapse::Recursion {
             gamma0,
             gamma1: 32,
@@ -532,8 +532,8 @@ fn recursion_api_roundtrip_chunked_dimensions() {
     let (n, t, cols, gamma0) = (64usize, 128usize, 128usize, 8usize);
     let config = || Config::<[u8; 32], RawRecordPayload> {
         n,
-        base2k: 18,
-        k: 54,
+        base2k: DEFAULT_BASE2K,
+        k: DEFAULT_K,
         collapse: Collapse::Recursion {
             gamma0,
             gamma1: 32,

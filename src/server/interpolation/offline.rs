@@ -17,8 +17,10 @@ use poulpy_hal::{
 };
 
 use crate::{
-    packing::{Packing, PackingKeysGenerate, PackingMaskAggregation, PackingPrecomputeInfos,
-        PackingPrecomputations},
+    packing::{
+        Packing, PackingKeysGenerate, PackingMaskAggregation, PackingPrecomputations,
+        PackingPrecomputeInfos,
+    },
     parallel::{assign_panels, num_threads, scoped_workers},
     payload::Payload,
     server::{
@@ -79,7 +81,9 @@ where
         let nthreads = num_threads(panels);
         while self.scratch_pool.len() < nthreads {
             self.scratch_pool
-                .push(ScratchOwned::<BE>::alloc(server_scratch_bytes(&self.params)));
+                .push(ScratchOwned::<BE>::alloc(server_scratch_bytes(
+                    &self.params,
+                )));
         }
 
         timings
@@ -175,8 +179,9 @@ where
         // own per-worker scratch). Output written by panel index ⇒ bit-identical
         // to the sequential order regardless of thread count.
         type PanelOut<BE> = (Option<PackingPrecomputations<BE>>, [Duration; 3]);
-        let mut outputs: Vec<PanelOut<BE>> =
-            (0..panels).map(|_| (None, [Duration::default(); 3])).collect();
+        let mut outputs: Vec<PanelOut<BE>> = (0..panels)
+            .map(|_| (None, [Duration::default(); 3]))
+            .collect();
 
         let k = self.layout.block_cols(self.params.n());
         let nthreads = num_threads(panels);

@@ -13,13 +13,13 @@ use poulpy_core::{
 };
 use poulpy_hal::{
     api::{
-        VecZnxAddAssignBackend, VecZnxAlloc, VecZnxAutomorphismBackend, VecZnxAutomorphismRotateBackend,
-        VecZnxBigBytesOf, VecZnxBigNormalize, VecZnxBigNormalizeTmpBytes, VecZnxCopyBackend, VecZnxDftAddAssign,
-        VecZnxDftAlloc, VecZnxDftApply, VecZnxDftAutomorphism, VecZnxDftAutomorphismPlan,
-        VecZnxDftBytesOf, VecZnxDftZero, VecZnxIdftApply, VecZnxIdftApplyTmpBytes, VecZnxNormalize,
-        VecZnxNormalizeTmpBytes,
-        VecZnxRshAssignBackend, VecZnxRshTmpBytes, VecZnxTransposeBackend, VecZnxZeroBackend,
-        VmpApplyDftToDft, VmpApplyDftToDftTmpBytes,
+        VecZnxAddAssignBackend, VecZnxAlloc, VecZnxAutomorphismBackend,
+        VecZnxAutomorphismRotateBackend, VecZnxBigBytesOf, VecZnxBigNormalize,
+        VecZnxBigNormalizeTmpBytes, VecZnxCopyBackend, VecZnxDftAddAssign, VecZnxDftAlloc,
+        VecZnxDftApply, VecZnxDftAutomorphism, VecZnxDftAutomorphismPlan, VecZnxDftBytesOf,
+        VecZnxDftZero, VecZnxIdftApply, VecZnxIdftApplyTmpBytes, VecZnxNormalize,
+        VecZnxNormalizeTmpBytes, VecZnxRshAssignBackend, VecZnxRshTmpBytes, VecZnxTransposeBackend,
+        VecZnxZeroBackend, VmpApplyDftToDft, VmpApplyDftToDftTmpBytes,
     },
     layouts::{
         Backend, GaloisElement, Module, ScratchArena, VecZnx, VecZnxToBackendMut,

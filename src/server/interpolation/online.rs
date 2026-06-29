@@ -84,15 +84,18 @@ where
         // per-query allocation/first-touch fault.
         while self.scratch_pool.len() < nthreads {
             self.scratch_pool
-                .push(ScratchOwned::<BE>::alloc(server_scratch_bytes(&self.params)));
+                .push(ScratchOwned::<BE>::alloc(server_scratch_bytes(
+                    &self.params,
+                )));
         }
 
         // One panel per work item: GEMV body product + pack, fully independent
         // (own pooled scratch, read-only shared precomputes/keys). Output written
         // by panel index ⇒ bit-identical to the sequential order.
         type PanelOut<BE> = (Option<GLWE<<BE as Backend>::OwnedBuf>>, [Duration; 2]);
-        let mut outputs: Vec<PanelOut<BE>> =
-            (0..panels).map(|_| (None, [Duration::default(); 2])).collect();
+        let mut outputs: Vec<PanelOut<BE>> = (0..panels)
+            .map(|_| (None, [Duration::default(); 2]))
+            .collect();
         let work = assign_panels(panels, k, nthreads);
 
         let region = Instant::now();
@@ -246,7 +249,9 @@ where
 
         while self.scratch_pool.len() < nthreads {
             self.scratch_pool
-                .push(ScratchOwned::<BE>::alloc(server_scratch_bytes(&self.params)));
+                .push(ScratchOwned::<BE>::alloc(server_scratch_bytes(
+                    &self.params,
+                )));
         }
 
         // One panel per work item: a batched body product (`nq` outputs) followed
@@ -265,8 +270,10 @@ where
             // `&mut self.scratch_pool` taken just below.
             let gemm: &dyn Gemm = &*self.gemm;
             // Shared `U` panels, per-query one-hot bodies.
-            let blocks_per_query: Vec<&[GLWECompressed<BE::OwnedBuf>]> =
-                queries.iter().map(|qy| qy.common.blocks.as_slice()).collect();
+            let blocks_per_query: Vec<&[GLWECompressed<BE::OwnedBuf>]> = queries
+                .iter()
+                .map(|qy| qy.common.blocks.as_slice())
+                .collect();
             let blocks_per_query = &blocks_per_query;
 
             let mut out_slabs: Vec<&mut [PanelOut<BE>]> = Vec::with_capacity(work.len());
@@ -286,8 +293,9 @@ where
                 |slab, group, sc| {
                     for (slot, w) in slab.iter_mut().zip(group.iter()) {
                         let panel = w.panel;
-                        let mut out_bodies: Vec<VecZnx<BE::OwnedBuf>> =
-                            (0..nq).map(|_| module.vec_znx_alloc(1, body_size)).collect();
+                        let mut out_bodies: Vec<VecZnx<BE::OwnedBuf>> = (0..nq)
+                            .map(|_| module.vec_znx_alloc(1, body_size))
+                            .collect();
                         full_torus_f64_body_product_batch::<BE>(
                             &mut out_bodies,
                             out_base2k,
@@ -320,7 +328,9 @@ where
         let mut per_query: Vec<Vec<GLWE<BE::OwnedBuf>>> =
             (0..nq).map(|_| Vec::with_capacity(panels)).collect();
         for panel_out in &mut outputs {
-            let panel_vec = panel_out.take().expect("panel worker did not fill its slot");
+            let panel_vec = panel_out
+                .take()
+                .expect("panel worker did not fill its slot");
             for (qi, glwe) in panel_vec.into_iter().enumerate() {
                 per_query[qi].push(glwe);
             }
@@ -341,7 +351,9 @@ where
                 &mut selected,
                 &mut self.scratch,
             );
-            responses.push(Response::Interpolation(InterpolationResponse::new(selected)));
+            responses.push(Response::Interpolation(InterpolationResponse::new(
+                selected,
+            )));
         }
         responses
     }
@@ -362,6 +374,12 @@ fn accumulate_body_product<BE>(
     BE: Backend<OwnedBuf = Vec<u8>> + poulpy_cpu_ref::reference::fft64::reim::ReimArith,
 {
     full_torus_f64_body_product::<BE>(
-        out_body, out_base2k, u_panel, bodies, body_base2k, torus_bits, gemm,
+        out_body,
+        out_base2k,
+        u_panel,
+        bodies,
+        body_base2k,
+        torus_bits,
+        gemm,
     );
 }

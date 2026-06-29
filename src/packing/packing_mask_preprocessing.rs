@@ -8,9 +8,8 @@ use poulpy_core::layouts::ModuleCoreAlloc;
 use poulpy_hal::{
     api::{
         ScratchArenaTakeBasic, VecZnxAddAssignBackend, VecZnxAutomorphismRotateBackend,
-        VecZnxCopyBackend, VecZnxNormalize, VecZnxNormalizeTmpBytes,
-        VecZnxRshAssignBackend, VecZnxRshTmpBytes,
-        VecZnxTransposeBackend, VecZnxZeroBackend,
+        VecZnxCopyBackend, VecZnxNormalize, VecZnxNormalizeTmpBytes, VecZnxRshAssignBackend,
+        VecZnxRshTmpBytes, VecZnxTransposeBackend, VecZnxZeroBackend,
     },
     layouts::{
         Backend, GaloisElement, Module, ScratchArena, VecZnx, VecZnxBackendMut, VecZnxBackendRef,
@@ -295,7 +294,14 @@ fn packing_mask_preprocessing_work<BE, R, A>(
             // `τ_{-1}(shared)` collapses into the `-h` automorphism since
             // τ_{-1} ∘ τ_h = τ_{-h}.
             module.vec_znx_automorphism_rotate_backend(h, k as i64, &mut shared_mut, 0, &t_ref, k);
-            module.vec_znx_automorphism_rotate_backend(-h, k as i64, &mut stage_a_mut, 0, &t_ref, k);
+            module.vec_znx_automorphism_rotate_backend(
+                -h,
+                k as i64,
+                &mut stage_a_mut,
+                0,
+                &t_ref,
+                k,
+            );
 
             binary_tree_step(
                 module,
@@ -393,7 +399,9 @@ fn packing_mask_preprocessing_work_threaded<BE, R, A>(
     assert_eq!(a.n(), n, "working input degree mismatch");
     assert_eq!(a.cols(), n, "working input must have d columns");
 
-    let h_list: Vec<i64> = (0..n_half).map(|i| module.galois_element(i as i64)).collect();
+    let h_list: Vec<i64> = (0..n_half)
+        .map(|i| module.galois_element(i as i64))
+        .collect();
     let nt = intra_threads.clamp(1, n_half);
 
     // Owned (shareable) transposed + `d⁻¹`-normalized input; read-only by workers.
@@ -406,7 +414,13 @@ fn packing_mask_preprocessing_work_threaded<BE, R, A>(
     {
         let mut t_mut = transposed.to_backend_mut();
         for col in 0..n {
-            module.vec_znx_rsh_assign_backend(base2k, log_n, &mut t_mut, col, &mut scratch.borrow());
+            module.vec_znx_rsh_assign_backend(
+                base2k,
+                log_n,
+                &mut t_mut,
+                col,
+                &mut scratch.borrow(),
+            );
         }
     }
 
@@ -514,7 +528,8 @@ pub(crate) fn packing_mask_preprocessing_threaded<BE, R, A>(
     let arithmetic_size = mask_preprocessing_arithmetic_size(size, base2k);
     let n = module.n();
     let scratch_local = scratch.borrow();
-    let (mut arithmetic_input, scratch_next) = scratch_local.take_vec_znx_scratch(n, n, arithmetic_size);
+    let (mut arithmetic_input, scratch_next) =
+        scratch_local.take_vec_znx_scratch(n, n, arithmetic_size);
     let (mut arithmetic_dst, mut scratch_next) =
         scratch_next.take_vec_znx_scratch(n, n, arithmetic_size);
 
@@ -818,7 +833,13 @@ fn packing_mask_preprocessing_partial_work_threaded<BE, R, A>(
     {
         let mut t_mut = transposed.to_backend_mut();
         for col in 0..gamma {
-            module.vec_znx_rsh_assign_backend(base2k, log_gamma, &mut t_mut, col, &mut scratch.borrow());
+            module.vec_znx_rsh_assign_backend(
+                base2k,
+                log_gamma,
+                &mut t_mut,
+                col,
+                &mut scratch.borrow(),
+            );
         }
     }
 
@@ -907,7 +928,10 @@ pub(crate) fn packing_mask_preprocessing_partial_threaded<BE, R, A>(
     VecZnx<Vec<u8>>: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE>,
 {
     let n = module.n();
-    assert!(gamma.is_power_of_two(), "partial packing requires a power-of-two γ");
+    assert!(
+        gamma.is_power_of_two(),
+        "partial packing requires a power-of-two γ"
+    );
     assert!(gamma <= n >> 1, "partial packing requires γ ≤ n/2");
 
     let size = dst.size();

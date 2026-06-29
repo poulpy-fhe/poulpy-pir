@@ -1,7 +1,7 @@
 use crate::{
-    config::{Collapse, INSPIRE_REC_32B},
+    config::{Collapse, DefaultPirConfig32B, DefaultPirParameters32B},
     database::DatabaseLayout,
-    payload::{Payload, U256P65535, U256P65536},
+    payload::{Payload, U256P65535},
 };
 use poulpy_cpu_ref::FFT64Ref;
 use poulpy_hal::layouts::Module;
@@ -98,8 +98,11 @@ fn accepts_second_dimension_exactly_2n() {
 /// `payloads_per_column`, so total payloads and bytes are unchanged).
 #[test]
 fn recursion_default_matches_paper_32_byte_payloads() {
-    let params = INSPIRE_REC_32B.new::<BE>();
-    let layout = DatabaseLayout::<U256P65536>::new(2048 * 32, 8192);
+    let default = DefaultPirParameters32B::InspireRecGamma32_1GiB
+        .recursion()
+        .expect("InspireRecGamma32_1GiB must resolve to recursion params");
+    let params = default.config.new::<BE>();
+    let layout = default.layout;
     assert_eq!(
         params.collapse(),
         Collapse::Recursion {
@@ -115,6 +118,305 @@ fn recursion_default_matches_paper_32_byte_payloads() {
     assert_eq!(layout.num_payloads(32), 1usize << 25);
     assert_eq!(layout.total_payload_bytes(32), 1usize << 30);
     assert_eq!(layout.column_blocks(params.n()), 4);
+}
+
+#[test]
+fn default_32b_parameter_enum_matches_table_shapes() {
+    let expected = [
+        (
+            DefaultPirParameters32B::InspireInt1GiB,
+            Collapse::Interpolation,
+            1,
+            8192,
+            140,
+        ),
+        (
+            DefaultPirParameters32B::InspireInt2GiB,
+            Collapse::Interpolation,
+            2,
+            16384,
+            196,
+        ),
+        (
+            DefaultPirParameters32B::InspireInt4GiB,
+            Collapse::Interpolation,
+            4,
+            32768,
+            308,
+        ),
+        (
+            DefaultPirParameters32B::InspireInt8GiB,
+            Collapse::Interpolation,
+            8,
+            65536,
+            532,
+        ),
+        (
+            DefaultPirParameters32B::InspireInt16GiB,
+            Collapse::Interpolation,
+            16,
+            131072,
+            980,
+        ),
+        (
+            DefaultPirParameters32B::InspireInt32GiB,
+            Collapse::Interpolation,
+            32,
+            262144,
+            1876,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma16_1GiB,
+            Collapse::Recursion {
+                gamma0: 16,
+                gamma1: 1024,
+                gamma2: 16,
+            },
+            1,
+            8192,
+            80,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma16_2GiB,
+            Collapse::Recursion {
+                gamma0: 16,
+                gamma1: 1024,
+                gamma2: 16,
+            },
+            2,
+            16384,
+            132,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma16_4GiB,
+            Collapse::Recursion {
+                gamma0: 16,
+                gamma1: 1024,
+                gamma2: 16,
+            },
+            4,
+            32768,
+            238,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma16_8GiB,
+            Collapse::Recursion {
+                gamma0: 16,
+                gamma1: 1024,
+                gamma2: 16,
+            },
+            8,
+            65536,
+            450,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma16_16GiB,
+            Collapse::Recursion {
+                gamma0: 16,
+                gamma1: 1024,
+                gamma2: 16,
+            },
+            16,
+            131072,
+            874,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma16_32GiB,
+            Collapse::Recursion {
+                gamma0: 16,
+                gamma1: 1024,
+                gamma2: 16,
+            },
+            32,
+            262144,
+            1722,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma32_1GiB,
+            Collapse::Recursion {
+                gamma0: 32,
+                gamma1: 1024,
+                gamma2: 32,
+            },
+            1,
+            8192,
+            66,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma32_2GiB,
+            Collapse::Recursion {
+                gamma0: 32,
+                gamma1: 1024,
+                gamma2: 32,
+            },
+            2,
+            16384,
+            119,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma32_4GiB,
+            Collapse::Recursion {
+                gamma0: 32,
+                gamma1: 1024,
+                gamma2: 32,
+            },
+            4,
+            32768,
+            225,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma32_8GiB,
+            Collapse::Recursion {
+                gamma0: 32,
+                gamma1: 1024,
+                gamma2: 32,
+            },
+            8,
+            65536,
+            437,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma32_16GiB,
+            Collapse::Recursion {
+                gamma0: 32,
+                gamma1: 1024,
+                gamma2: 32,
+            },
+            16,
+            131072,
+            861,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma32_32GiB,
+            Collapse::Recursion {
+                gamma0: 32,
+                gamma1: 1024,
+                gamma2: 32,
+            },
+            32,
+            262144,
+            1709,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma64_1GiB,
+            Collapse::Recursion {
+                gamma0: 64,
+                gamma1: 1024,
+                gamma2: 64,
+            },
+            1,
+            8192,
+            60,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma64_2GiB,
+            Collapse::Recursion {
+                gamma0: 64,
+                gamma1: 1024,
+                gamma2: 64,
+            },
+            2,
+            16384,
+            113,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma64_4GiB,
+            Collapse::Recursion {
+                gamma0: 64,
+                gamma1: 1024,
+                gamma2: 64,
+            },
+            4,
+            32768,
+            219,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma64_8GiB,
+            Collapse::Recursion {
+                gamma0: 64,
+                gamma1: 1024,
+                gamma2: 64,
+            },
+            8,
+            65536,
+            431,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma64_16GiB,
+            Collapse::Recursion {
+                gamma0: 64,
+                gamma1: 1024,
+                gamma2: 64,
+            },
+            16,
+            131072,
+            855,
+        ),
+        (
+            DefaultPirParameters32B::InspireRecGamma64_32GiB,
+            Collapse::Recursion {
+                gamma0: 64,
+                gamma1: 1024,
+                gamma2: 64,
+            },
+            32,
+            262144,
+            1703,
+        ),
+    ];
+
+    assert_eq!(DefaultPirParameters32B::ALL, expected.map(|(p, ..)| p));
+
+    for (params, collapse, gib, cols, query_kib) in expected {
+        assert_eq!(params.db_size_gib(), gib);
+        assert_eq!(params.rows(), 1 << 16);
+        assert_eq!(params.cols(), cols);
+        assert_eq!(params.collapse(), collapse);
+        assert_eq!(params.query_kib(), query_kib);
+
+        match params.resolve() {
+            DefaultPirConfig32B::Interpolation(resolved) => {
+                assert_eq!(collapse, Collapse::Interpolation);
+                assert_eq!(resolved.db_size_gib, gib);
+                assert_eq!(params.gamma0(), None);
+                assert_eq!(params.gamma1(), None);
+                assert_eq!(params.gamma2(), None);
+                let config = resolved.config;
+                let layout = resolved.layout;
+                assert_eq!(config.collapse(), collapse);
+                assert_eq!(layout.rows(), params.rows());
+                assert_eq!(layout.cols(), cols);
+                assert_eq!(layout.interpolation_t(config.n()), 32);
+                assert!(params.interpolation().is_some());
+                assert!(params.recursion().is_none());
+            }
+            DefaultPirConfig32B::Recursion(resolved) => {
+                let Collapse::Recursion {
+                    gamma0,
+                    gamma1,
+                    gamma2,
+                } = collapse
+                else {
+                    panic!("expected recursion collapse");
+                };
+                assert_eq!(resolved.db_size_gib, gib);
+                assert_eq!(resolved.gamma0, gamma0);
+                assert_eq!(resolved.gamma1, gamma1);
+                assert_eq!(resolved.gamma2, gamma2);
+                assert_eq!(params.gamma0(), Some(gamma0));
+                assert_eq!(params.gamma1(), Some(gamma1));
+                assert_eq!(params.gamma2(), Some(gamma2));
+                let config = resolved.config;
+                let layout = resolved.layout;
+                assert_eq!(config.collapse(), collapse);
+                assert_eq!(layout.rows(), params.rows());
+                assert_eq!(layout.cols(), cols);
+                assert_eq!(layout.grid_rows_for(gamma0), params.rows() / gamma0);
+                assert!(params.interpolation().is_none());
+                assert!(params.recursion().is_some());
+            }
+        }
+    }
 }
 
 /// A payload must fit within one column: `payload_digits ≤ n`.

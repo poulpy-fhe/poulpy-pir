@@ -153,7 +153,12 @@ where
                     let mut packed = module.glwe_alloc_from_infos(src_infos);
                     module.pack(&mut packed, body, precompute, key, 1, &mut sc.borrow());
                     let mut switched = module.glwe_alloc_from_infos(qtilde_infos);
-                    modulus_switch_to_digits::<BE>(module, &mut switched, &packed, &mut sc.borrow());
+                    modulus_switch_to_digits::<BE>(
+                        module,
+                        &mut switched,
+                        &packed,
+                        &mut sc.borrow(),
+                    );
                     *slot = Some(switched);
                 }
             },

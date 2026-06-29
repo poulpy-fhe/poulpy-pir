@@ -16,33 +16,22 @@ use std::time::Instant;
 use poulpy_cpu_avx::FFT64Avx;
 use poulpy_pir::{
     client::{Client, Response},
-    config::{Collapse, Config, INSPIRE_INT_32B, INSPIRE_REC_32B},
+    config::{Collapse, Config, DefaultPirConfig32B, DefaultPirParameters32B},
     database::DatabaseLayout,
-    payload::{Payload, U256P65535, U256P65536},
+    payload::Payload,
     server::Server,
 };
 
 /// Backend used by this driver.
 type BE = FFT64Avx;
-
-const DB_ROWS: usize = 1<<16;
-const DB_COLS: usize = 1<<18;
+const DEFAULT: DefaultPirParameters32B = DefaultPirParameters32B::InspireRecGamma32_32GiB;
 
 fn main() {
     const ITEM_INDEX: usize = 1_000_000;
 
-    if false {
-        run(
-            INSPIRE_INT_32B,
-            DatabaseLayout::<U256P65535>::new(DB_ROWS, DB_COLS),
-            ITEM_INDEX,
-        );
-    } else {
-        run(
-            INSPIRE_REC_32B,
-            DatabaseLayout::<U256P65536>::new(DB_ROWS, DB_COLS),
-            ITEM_INDEX,
-        );
+    match DEFAULT.resolve() {
+        DefaultPirConfig32B::Interpolation(params) => run(params.config, params.layout, ITEM_INDEX),
+        DefaultPirConfig32B::Recursion(params) => run(params.config, params.layout, ITEM_INDEX),
     }
 }
 

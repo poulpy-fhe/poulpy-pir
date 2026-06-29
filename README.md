@@ -37,12 +37,12 @@ A run is described by one configuration bundling the construction, the database 
 - **Database shape** — total `rows × cols`; any split holding the same database is valid and trades query size against response size.
 - **Payload** — the record type (the examples retrieve a 32-byte / 256-bit payload).
 
-Two ready-made configurations ship with the crate:
-
-| Configuration | Construction |
-|---|---|
-| `INSPIRE_INT_32B` | InsPIRe (interpolation) |
-| `INSPIRE_REC_32B` | InsPIRe² (recursion) |
+For full 32-byte defaults, use `DefaultPirParameters32B`: it enumerates
+InsPIRe and InsPIRe² layouts for 1, 2, 4, 8, 16, and 32 GiB databases and
+resolves each preset to a parameter bundle containing the DB size, matching
+`Config`, `DatabaseLayout`, and for InsPIRe² the `gamma0`, `gamma1`, and
+`gamma2` packing widths. InsPIRe² presets include the `gamma0/gamma2` families
+`16/16`, `32/32`, and `64/64` with `gamma1=1024`.
 
 The reconstructed database splits from the paper's Table 2 are tabulated in [`table2_db_parameters.md`](table2_db_parameters.md); [`RECURSION_RAM_MODEL.md`](RECURSION_RAM_MODEL.md) gives memory-scaling estimates for InsPIRe² up to a 32 GiB database.
 

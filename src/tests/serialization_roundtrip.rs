@@ -9,7 +9,7 @@ use poulpy_cpu_avx::FFT64Avx;
 
 use crate::{
     client::Client,
-    config::{Collapse, Config, INSPIRE_INT_32B, INSPIRE_REC_32B},
+    config::{Collapse, Config, DefaultPirParameters32B, DEFAULT_BASE2K, DEFAULT_K, DEFAULT_N},
     database::DatabaseLayout,
     payload::{Payload, U256P65535, U256P65536},
     serialization::{query_component_sizes, response_component_sizes},
@@ -64,6 +64,10 @@ fn report_sizes<P: Payload<[u8; 32]>>(
 /// packing keys, since the paper amortizes them to setup. Run with `--nocapture`.
 #[test]
 fn measure_query_sizes_vs_table() {
+    let interp_config = DefaultPirParameters32B::InspireInt1GiB
+        .interpolation()
+        .expect("InspireInt1GiB must resolve to interpolation params")
+        .config;
     // (db, cols, rows, paper query KB)
     let interp = [
         ("1GB", 8192usize, 65536usize, 140),
@@ -81,7 +85,7 @@ fn measure_query_sizes_vs_table() {
     );
     for (db, cols, rows, paper) in interp {
         let layout = DatabaseLayout::<U256P65535>::new(rows, cols);
-        let mut client = Client::<BE, U256P65535>::new(INSPIRE_INT_32B, layout);
+        let mut client = Client::<BE, U256P65535>::new(interp_config, layout);
         let (query, _) = client.query(0);
         let module = client.params().module();
         let mut buf = Vec::new();
@@ -101,8 +105,12 @@ fn measure_query_sizes_vs_table() {
         );
     }
 
-    // InsPIRe2: production config has gamma0 = 32; compare to table gamma0=32 rows.
-    let Collapse::Recursion { gamma0, .. } = INSPIRE_REC_32B.collapse() else {
+    // InsPIRe2: compare to table gamma0=32 rows.
+    let rec_config = DefaultPirParameters32B::InspireRecGamma32_1GiB
+        .recursion()
+        .expect("InspireRecGamma32_1GiB must resolve to recursion params")
+        .config;
+    let Collapse::Recursion { gamma0, .. } = rec_config.collapse() else {
         unreachable!()
     };
     let rec = [
@@ -121,7 +129,7 @@ fn measure_query_sizes_vs_table() {
     for (db, cols, paper) in rec {
         let rows = cols; // square-ish; only `cols` drives the one-hot width
         let layout = DatabaseLayout::<U256P65536>::new(rows * gamma0, cols);
-        let mut client = Client::<BE, U256P65536>::new(INSPIRE_REC_32B, layout);
+        let mut client = Client::<BE, U256P65536>::new(rec_config, layout);
         let (query, _) = client.query(0);
         let module = client.params().module();
         let mut buf = Vec::new();
@@ -146,20 +154,28 @@ fn measure_query_sizes_vs_table() {
 /// Run with `--nocapture` to see the numbers.
 #[test]
 fn measure_serialized_sizes() {
-    let n = INSPIRE_INT_32B.n();
+    let interp_config = DefaultPirParameters32B::InspireInt1GiB
+        .interpolation()
+        .expect("InspireInt1GiB must resolve to interpolation params")
+        .config;
+    let n = interp_config.n();
     report_sizes(
         "InsPIRe (interpolation)",
-        INSPIRE_INT_32B,
+        interp_config,
         DatabaseLayout::<U256P65535>::new(2 * n, n),
         300_000,
     );
 
-    let Collapse::Recursion { gamma0, .. } = INSPIRE_REC_32B.collapse() else {
+    let rec_config = DefaultPirParameters32B::InspireRecGamma32_1GiB
+        .recursion()
+        .expect("InspireRecGamma32_1GiB must resolve to recursion params")
+        .config;
+    let Collapse::Recursion { gamma0, .. } = rec_config.collapse() else {
         unreachable!()
     };
     let layout = DatabaseLayout::<U256P65536>::new(70 * gamma0, 70);
     let item = layout.num_payloads(gamma0) - 1;
-    report_sizes("InsPIRe2 (recursion)", INSPIRE_REC_32B, layout, item);
+    report_sizes("InsPIRe2 (recursion)", rec_config, layout, item);
 }
 
 /// Serializes `query`, deserializes it against `params`, and asserts the byte
@@ -175,7 +191,9 @@ fn roundtrip_query<P: crate::payload::Payload<[u8; 32]>>(
     eprintln!("[{label}] query serialized: {} bytes", bytes.len());
     let decoded = Query::read_from(&mut &bytes[..], params).expect("query read_from");
     let mut bytes2 = Vec::new();
-    decoded.write_to(module, &mut bytes2).expect("query re-write_to");
+    decoded
+        .write_to(module, &mut bytes2)
+        .expect("query re-write_to");
     assert_eq!(bytes, bytes2, "query serialization is not stable");
     decoded
 }
@@ -187,12 +205,16 @@ fn roundtrip_response<P: crate::payload::Payload<[u8; 32]>>(
 ) -> crate::client::Response<BE> {
     let module = params.module();
     let mut bytes = Vec::new();
-    response.write_to(module, &mut bytes).expect("response write_to");
+    response
+        .write_to(module, &mut bytes)
+        .expect("response write_to");
     eprintln!("[{label}] response serialized: {} bytes", bytes.len());
     let decoded =
         crate::client::Response::read_from(&mut &bytes[..], params).expect("response read_from");
     let mut bytes2 = Vec::new();
-    decoded.write_to(module, &mut bytes2).expect("response re-write_to");
+    decoded
+        .write_to(module, &mut bytes2)
+        .expect("response re-write_to");
     assert_eq!(bytes, bytes2, "response serialization is not stable");
     decoded
 }
@@ -201,9 +223,9 @@ fn roundtrip_response<P: crate::payload::Payload<[u8; 32]>>(
 #[test]
 fn serialization_roundtrip_interpolation() {
     let config = Config::<[u8; 32], U256P65535> {
-        n: 2048,
-        base2k: 18,
-        k: 54,
+        n: DEFAULT_N,
+        base2k: DEFAULT_BASE2K,
+        k: DEFAULT_K,
         collapse: Collapse::Interpolation,
         _phantom: PhantomData,
     };
@@ -244,8 +266,8 @@ fn serialization_roundtrip_interpolation() {
 fn serialization_roundtrip_recursion() {
     let config = Config::<[u8; 32], U256P65536> {
         n: 64,
-        base2k: 18,
-        k: 54,
+        base2k: DEFAULT_BASE2K,
+        k: DEFAULT_K,
         collapse: Collapse::Recursion {
             gamma0: 32,
             gamma1: 32,

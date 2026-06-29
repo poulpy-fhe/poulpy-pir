@@ -3,13 +3,13 @@
 
 use std::time::{Duration, Instant};
 
+use poulpy_core::layouts::GLWEAutomorphismKeyCompressed;
 use poulpy_core::{
     GLWENormalize,
     layouts::{
         Degree, GLWE, LWEInfos, LWEMatrix, LWEMatrixLayout, LWEMatrixToBackendMut, ModuleCoreAlloc,
     },
 };
-use poulpy_core::layouts::GLWEAutomorphismKeyCompressed;
 use poulpy_hal::{
     api::{ScratchOwnedAlloc, ScratchOwnedBorrow, VecZnxDftAutomorphismPlan},
     layouts::{
@@ -139,7 +139,9 @@ where
         let db_views: Vec<Vec<PreparedF64<'_>>> = (0..physical_rows)
             .map(|row_group| {
                 (0..self.database.column_blocks())
-                    .map(|block| PreparedF64::from_matrix(self.database.physical_block(row_group, block)))
+                    .map(|block| {
+                        PreparedF64::from_matrix(self.database.physical_block(row_group, block))
+                    })
                     .collect()
             })
             .collect();
@@ -155,8 +157,9 @@ where
         let mask_threads = (num_threads(usize::MAX) / nthreads).max(1);
         let work = assign_panels(physical_rows, 1, nthreads);
         type GroupOut<BE> = (Option<Vec<PackingPrecomputations<BE>>>, [Duration; 3]);
-        let mut outputs: Vec<GroupOut<BE>> =
-            (0..physical_rows).map(|_| (None, [Duration::default(); 3])).collect();
+        let mut outputs: Vec<GroupOut<BE>> = (0..physical_rows)
+            .map(|_| (None, [Duration::default(); 3]))
+            .collect();
 
         let region = Instant::now();
         {
@@ -261,7 +264,10 @@ where
         shape: RecursionOfflineShape,
         mask_data: &[Vec<i16>],
         timings: &mut OfflineTimings,
-    ) -> (Vec<Vec<PreparedF64<'static>>>, Vec<PackingPrecomputations<BE>>) {
+    ) -> (
+        Vec<Vec<PreparedF64<'static>>>,
+        Vec<PackingPrecomputations<BE>>,
+    ) {
         let state = self.recursion_state();
         assert!(
             !state.q1_masks.is_empty(),
@@ -406,5 +412,8 @@ where
         precomputes.push(precompute);
     }
 
-    (precomputes, [d_mask_product, d_mask_prep, d_pack_precompute])
+    (
+        precomputes,
+        [d_mask_product, d_mask_prep, d_pack_precompute],
+    )
 }
