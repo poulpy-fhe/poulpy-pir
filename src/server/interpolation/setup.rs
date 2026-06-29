@@ -96,6 +96,7 @@ where
             precomputation: ServerPrecomputation::Interpolation(
                 InterpolationPrecomputation::default(),
             ),
+            gemm: Box::new(crate::server::PrivateGemmX86),
         }
     }
 

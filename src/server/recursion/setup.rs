@@ -151,6 +151,7 @@ where
                 q1_masks: Vec::new(),
             }),
             precomputation: ServerPrecomputation::Recursion(RecursionPrecomputation::default()),
+            gemm: Box::new(crate::server::PrivateGemmX86),
         }
     }
 

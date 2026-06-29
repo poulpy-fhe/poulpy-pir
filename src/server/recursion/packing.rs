@@ -31,7 +31,7 @@ use crate::{
     parallel::{assign_panels, num_threads, scoped_workers},
     payload::Payload,
     server::{
-        OfflineTimings, OnlineTimings, Server,
+        Gemm, OfflineTimings, OnlineTimings, Server,
         api::RecursionServerModule,
         common::{PreparedF64, QueryMask, full_torus_f64_body_product, mask_product_to_pack},
     },
@@ -157,6 +157,7 @@ where
         let region = Instant::now();
         {
             let res_infos = &res_infos;
+            let gemm: &dyn Gemm = &*self.gemm;
             let mut slabs: Vec<&mut [BatchOut<BE>]> = Vec::with_capacity(work.len());
             let mut rest = outputs.as_mut_slice();
             for group in &work {
@@ -183,6 +184,7 @@ where
                         all_digits,
                         q_masks,
                         key_mask_source,
+                        gemm,
                         &mut sc.borrow(),
                     );
                     *slot = (Some((row_prep, precompute)), d);
@@ -304,6 +306,7 @@ fn compute_pack_mask_batch<BE>(
     all_digits: &[Vec<i16>],
     q_masks: &[QueryMask],
     key_mask_source: &GLWEAutomorphismKeyCompressed<BE::OwnedBuf>,
+    gemm: &dyn Gemm,
     scratch: &mut ScratchArena<'_, BE>,
 ) -> (Vec<PreparedF64<'static>>, PackingPrecomputations<BE>, [Duration; 4])
 where
@@ -334,8 +337,15 @@ where
     let d_prepare = started.elapsed();
 
     let started = Instant::now();
-    let res_mask =
-        mask_product_to_pack(module, res_infos, &row_prep, q_masks, torus_bits, mask_threads);
+    let res_mask = mask_product_to_pack(
+        module,
+        res_infos,
+        &row_prep,
+        q_masks,
+        torus_bits,
+        mask_threads,
+        gemm,
+    );
     let d_mask_product = started.elapsed();
 
     let started = Instant::now();
@@ -389,6 +399,7 @@ pub(super) fn pack_bodies_pooled<BE>(
     precomputes: &[PackingPrecomputations<BE>],
     q_bodies: &[GLWECompressed<BE::OwnedBuf>],
     key_precomp: &PackingKeys<BE>,
+    gemm: &dyn Gemm,
     pool: &mut [ScratchOwned<BE>],
 ) -> (Vec<GLWE<BE::OwnedBuf>>, Duration, Duration)
 where
@@ -409,7 +420,9 @@ where
     for row_prep in prepared {
         let mut res_body = module.vec_znx_alloc(1, size);
         let started = Instant::now();
-        full_torus_f64_body_product::<BE>(&mut res_body, base2k, row_prep, q_bodies, base2k, torus_bits);
+        full_torus_f64_body_product::<BE>(
+            &mut res_body, base2k, row_prep, q_bodies, base2k, torus_bits, gemm,
+        );
         body_product += started.elapsed();
         bodies.push(res_body);
     }

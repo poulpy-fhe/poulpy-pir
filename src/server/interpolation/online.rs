@@ -22,7 +22,7 @@ use crate::{
     parallel::{assign_panels, num_threads, scoped_workers_pooled},
     payload::Payload,
     server::{
-        OnlineTimings, Server, ServerCollapse, ServerPrecomputation,
+        Gemm, OnlineTimings, Server, ServerCollapse, ServerPrecomputation,
         api::InterpolationServerModule,
         common::{PreparedF64, full_torus_f64_body_product},
         interpolation::setup::server_scratch_bytes,
@@ -102,6 +102,9 @@ where
             let key_precomp = &key_precomputations;
             let blocks = &query.common.blocks;
             let glwe_pack_ref = &glwe_pack;
+            // Borrow the `gemm` field directly (not via `self.gemm()`) so it stays
+            // disjoint from the `&mut self.scratch_pool` taken just below.
+            let gemm: &dyn Gemm = &*self.gemm;
 
             let mut out_slabs: Vec<&mut [PanelOut<BE>]> = Vec::with_capacity(work.len());
             let mut rest = outputs.as_mut_slice();
@@ -129,6 +132,7 @@ where
                             torus_bits,
                             &prepared_u[panel],
                             blocks,
+                            gemm,
                         );
                         let bp = t.elapsed();
                         let mut packed = module.glwe_alloc_from_infos(glwe_pack_ref);
@@ -203,8 +207,11 @@ fn accumulate_body_product<BE>(
     torus_bits: usize,
     u_panel: &[PreparedF64],
     bodies: &[GLWECompressed<BE::OwnedBuf>],
+    gemm: &dyn Gemm,
 ) where
     BE: Backend<OwnedBuf = Vec<u8>> + poulpy_cpu_ref::reference::fft64::reim::ReimArith,
 {
-    full_torus_f64_body_product::<BE>(out_body, out_base2k, u_panel, bodies, body_base2k, torus_bits);
+    full_torus_f64_body_product::<BE>(
+        out_body, out_base2k, u_panel, bodies, body_base2k, torus_bits, gemm,
+    );
 }

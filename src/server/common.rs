@@ -17,7 +17,9 @@ use std::borrow::Cow;
 
 use poulpy_cpu_ref::reference::fft64::reim::ReimArith;
 
-use crate::{database::CoeffMatrix, parameters::Parameters, payload::Payload};
+use crate::{
+    database::CoeffMatrix, parameters::Parameters, payload::Payload, server::gemm::Gemm,
+};
 
 pub(super) fn default_query_mask_tmp_bytes<BE, R, GM>(
     module: &Module<BE>,
@@ -219,6 +221,7 @@ pub(super) fn mask_product_to_pack<BE, I>(
     masks: &[QueryMask],
     torus_bits: usize,
     mask_threads: usize,
+    gemm: &dyn Gemm,
 ) -> LWEMatrix<BE::OwnedBuf>
 where
     BE: Backend<OwnedBuf = Vec<u8>> + ReimArith,
@@ -226,7 +229,7 @@ where
     Module<BE>: ModuleCoreAlloc<OwnedBuf = Vec<u8>>,
 {
     let mut out = module.lwe_matrix_alloc_from_infos(out_infos);
-    full_torus_f64_mask_product::<BE>(&mut out, prepared, masks, torus_bits, mask_threads);
+    full_torus_f64_mask_product::<BE>(&mut out, prepared, masks, torus_bits, mask_threads, gemm);
     out
 }
 
@@ -261,13 +264,14 @@ fn accumulate_mask_range(
     rows_out: usize,
     lwe_n: usize,
     range: std::ops::Range<usize>,
+    gemm: &dyn Gemm,
 ) {
     let mut wide: Vec<f64> = Vec::new();
     for bc in range {
         let u = &prepared[bc];
         let rhs = &masks[bc];
         u.widen_into(&mut wide);
-        gemm_f64_add(acc, &wide, &rhs.values, rows_out, u.rows_in, lwe_n);
+        gemm.gemm_f64_add(acc, &wide, &rhs.values, rows_out, u.rows_in, lwe_n);
     }
 }
 
@@ -277,6 +281,7 @@ fn full_torus_f64_mask_product<BE>(
     masks: &[QueryMask],
     torus_bits: usize,
     mask_threads: usize,
+    gemm: &dyn Gemm,
 ) where
     BE: Backend<OwnedBuf = Vec<u8>> + ReimArith,
 {
@@ -301,7 +306,7 @@ fn full_torus_f64_mask_product<BE>(
         );
     }
 
-    let acc = mask_product_acc(prepared, masks, rows_out, lwe_n, mask_threads);
+    let acc = mask_product_acc(prepared, masks, rows_out, lwe_n, mask_threads, gemm);
 
     out.body_mut().raw_mut().fill(0);
     encode_torus_mask_f64::<BE>(out, &acc, rows_out, lwe_n, torus_bits);
@@ -320,12 +325,13 @@ fn mask_product_acc(
     rows_out: usize,
     lwe_n: usize,
     mask_threads: usize,
+    gemm: &dyn Gemm,
 ) -> Vec<f64> {
     let k = prepared.len();
     let nt = mask_threads.clamp(1, k);
     if nt <= 1 {
         let mut acc = vec![0.0f64; rows_out * lwe_n];
-        accumulate_mask_range(&mut acc, prepared, masks, rows_out, lwe_n, 0..k);
+        accumulate_mask_range(&mut acc, prepared, masks, rows_out, lwe_n, 0..k, gemm);
         return acc;
     }
 
@@ -342,7 +348,7 @@ fn mask_product_acc(
     std::thread::scope(|scope| {
         for (part, range) in partials.iter_mut().zip(ranges.into_iter()) {
             scope.spawn(move || {
-                accumulate_mask_range(part, prepared, masks, rows_out, lwe_n, range);
+                accumulate_mask_range(part, prepared, masks, rows_out, lwe_n, range, gemm);
             });
         }
     });
@@ -366,6 +372,7 @@ pub(super) fn full_torus_f64_body_product<BE>(
     bodies: &[GLWECompressed<BE::OwnedBuf>],
     body_base2k: usize,
     torus_bits: usize,
+    gemm: &dyn Gemm,
 ) where
     BE: Backend<OwnedBuf = Vec<u8>> + ReimArith,
 {
@@ -389,146 +396,10 @@ pub(super) fn full_torus_f64_body_product<BE>(
         decode_torus_body_f64(&mut rhs, body.data(), u.rows_in, body_base2k, torus_bits);
         // GEMV `acc += U * b`: read `U` as i16 and widen in-register (no 32 MiB
         // f64 panel materialized) — the memory-bound online win.
-        gemv_i16_f64_add(&mut acc, &u.values, &rhs, u.rows_out, u.rows_in);
+        gemm.gemv_i16_f64_add(&mut acc, &u.values, &rhs, u.rows_out, u.rows_in);
     }
 
     encode_torus_body_f64::<BE>(out, out_base2k, &acc, rows_out, torus_bits);
-}
-
-/// Picks the densest available x86 instruction set for the GEMM kernel. AVX2 is a
-/// hard requirement of the AVX backend this crate runs on, so `Avx256` is the
-/// floor; `Avx512` is selected at runtime when the CPU reports `avx512f`.
-fn gemm_instr_set() -> private_gemm_x86::InstrSet {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::arch::is_x86_feature_detected!("avx512f") {
-            return private_gemm_x86::InstrSet::Avx512;
-        }
-    }
-    private_gemm_x86::InstrSet::Avx256
-}
-
-/// Single-threaded dense `f64` GEMM `dst += lhs * rhs` for contiguous row-major
-/// matrices: `lhs` is `m x k`, `rhs` is `k x n`, `dst` is `m x n`. Uses the
-/// `private-gemm-x86` kernel (the same one faer dispatches to), with the
-/// instruction set auto-selected at runtime by [`gemm_instr_set`].
-fn gemm_f64_add(dst: &mut [f64], lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize) {
-    assert_eq!(dst.len(), m * n, "dst must be m*n");
-    assert_eq!(lhs.len(), m * k, "lhs must be m*k");
-    assert_eq!(rhs.len(), k * n, "rhs must be k*n");
-
-    let alpha = 1.0f64;
-    // SAFETY: `dst`/`lhs`/`rhs` are contiguous row-major buffers sized exactly for
-    // the `m x n`, `m x k`, `k x n` shapes asserted above; the element strides
-    // below match that layout (row stride = number of columns, col stride = 1).
-    // `dst_row_idx`/`dst_col_idx`/`real_diag` are unused for `DstKind::Full`, and
-    // `alpha` points to a live `f64`. The kernel runs single-threaded.
-    unsafe {
-        private_gemm_x86::gemm(
-            private_gemm_x86::DType::F64,
-            private_gemm_x86::IType::U64,
-            gemm_instr_set(),
-            m,
-            n,
-            k,
-            dst.as_mut_ptr().cast(),
-            n as isize,
-            1,
-            core::ptr::null(),
-            core::ptr::null(),
-            private_gemm_x86::DstKind::Full,
-            private_gemm_x86::Accum::Add,
-            lhs.as_ptr().cast(),
-            k as isize,
-            1,
-            false,
-            core::ptr::null(),
-            0,
-            rhs.as_ptr().cast(),
-            n as isize,
-            1,
-            false,
-            (&raw const alpha).cast(),
-            1,
-        );
-    }
-}
-
-/// GEMV `acc[i] += sum_j U[i][j] * b[j]`, reading the `rows_out × rows_in`
-/// contraction operand `U` as row-major **`i16`** and widening to `f64`
-/// **in-register** (never materializing the f64 panel). This is the
-/// memory-bound online body product, so reading `U` as i16 (¼ the bytes) is the
-/// win; AVX2+FMA path when available, scalar floor otherwise.
-///
-/// Determinism: the SIMD accumulation order differs from `private-gemm`, so the
-/// result is *cryptographically equivalent* (a few f64 ulps, far below the torus
-/// rounding margin and FHE noise floor), not byte-identical — same relaxation as
-/// the M3 mask-product tiling. `PIR_THREADS`-independent.
-fn gemv_i16_f64_add(acc: &mut [f64], u: &[i16], b: &[f64], rows_out: usize, rows_in: usize) {
-    debug_assert_eq!(u.len(), rows_out * rows_in);
-    debug_assert_eq!(b.len(), rows_in);
-    debug_assert_eq!(acc.len(), rows_out);
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
-        {
-            // SAFETY: avx2+fma confirmed; lengths checked above.
-            unsafe { gemv_i16_f64_add_avx2(acc, u, b, rows_out, rows_in) };
-            return;
-        }
-    }
-    for (i, a) in acc.iter_mut().enumerate() {
-        let row = &u[i * rows_in..i * rows_in + rows_in];
-        let mut s = 0.0f64;
-        for (&uij, &bj) in row.iter().zip(b) {
-            s += uij as f64 * bj;
-        }
-        *a += s;
-    }
-}
-
-/// AVX2+FMA body of [`gemv_i16_f64_add`]: per row, load 8 × i16, widen to two
-/// `__m256d` lanes in-register, FMA against `b`, then horizontal-sum.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn gemv_i16_f64_add_avx2(
-    acc: &mut [f64],
-    u: &[i16],
-    b: &[f64],
-    rows_out: usize,
-    rows_in: usize,
-) {
-    use std::arch::x86_64::*;
-    let bp = b.as_ptr();
-    for i in 0..rows_out {
-        let row = unsafe { u.as_ptr().add(i * rows_in) };
-        let mut acc0 = _mm256_setzero_pd();
-        let mut acc1 = _mm256_setzero_pd();
-        let mut j = 0;
-        while j + 8 <= rows_in {
-            let v16 = unsafe { _mm_loadu_si128(row.add(j).cast::<__m128i>()) };
-            let v32 = _mm256_cvtepi16_epi32(v16);
-            let lo = _mm256_cvtepi32_pd(_mm256_castsi256_si128(v32));
-            let hi = _mm256_cvtepi32_pd(_mm256_extracti128_si256::<1>(v32));
-            let b0 = unsafe { _mm256_loadu_pd(bp.add(j)) };
-            let b1 = unsafe { _mm256_loadu_pd(bp.add(j + 4)) };
-            acc0 = _mm256_fmadd_pd(lo, b0, acc0);
-            acc1 = _mm256_fmadd_pd(hi, b1, acc1);
-            j += 8;
-        }
-        // Horizontal sum of the 8 partial lanes.
-        let summed = _mm256_add_pd(acc0, acc1);
-        let lo128 = _mm256_castpd256_pd128(summed);
-        let hi128 = _mm256_extractf128_pd::<1>(summed);
-        let pair = _mm_add_pd(lo128, hi128);
-        let mut s = _mm_cvtsd_f64(_mm_add_sd(pair, _mm_unpackhi_pd(pair, pair)));
-        // Scalar tail.
-        while j < rows_in {
-            s += unsafe { *row.add(j) as f64 * *bp.add(j) };
-            j += 1;
-        }
-        unsafe { *acc.as_mut_ptr().add(i) += s };
-    }
 }
 
 fn decode_torus_mask_f64(
@@ -682,6 +553,7 @@ pub(super) fn copy_lwe_matrix_mask_rows<D>(
 #[cfg(test)]
 mod mask_product_tests {
     use super::{PreparedF64, QueryMask, mask_product_acc};
+    use crate::server::gemm::PrivateGemmX86;
 
     /// Deterministic pseudo-random f64 in `[lo, hi)`.
     fn prng(state: &mut u64) -> f64 {
@@ -714,13 +586,13 @@ mod mask_product_tests {
     fn tiled_matches_sequential_within_noise_floor() {
         let (rows_out, rows_in, lwe_n, k) = (16, 16, 4, 13);
         let (prepared, masks) = synthetic(k, rows_out, rows_in, lwe_n);
-        let seq = mask_product_acc(&prepared, &masks, rows_out, lwe_n, 1);
+        let seq = mask_product_acc(&prepared, &masks, rows_out, lwe_n, 1, &PrivateGemmX86);
         // The accumulated magnitude here is ~rows_in * 2^15 * 0.5 * k ≈ 2^25; the
         // f64 ulp is ~2^-27, so any reorder gap is a few ulps. The torus encode
         // rounds at ~2^-(53-torus_bits) of that, far coarser. Assert the relative
         // gap is < 1e-9 (cryptographically equivalent).
         for nt in [2, 3, 4, 8, k, k + 5] {
-            let tiled = mask_product_acc(&prepared, &masks, rows_out, lwe_n, nt);
+            let tiled = mask_product_acc(&prepared, &masks, rows_out, lwe_n, nt, &PrivateGemmX86);
             assert_eq!(tiled.len(), seq.len());
             let max_abs: f64 = seq
                 .iter()
@@ -741,9 +613,9 @@ mod mask_product_tests {
         // With k=1 there is nothing to reorder: every thread count is identical.
         let (rows_out, rows_in, lwe_n) = (8, 8, 3);
         let (prepared, masks) = synthetic(1, rows_out, rows_in, lwe_n);
-        let seq = mask_product_acc(&prepared, &masks, rows_out, lwe_n, 1);
+        let seq = mask_product_acc(&prepared, &masks, rows_out, lwe_n, 1, &PrivateGemmX86);
         for nt in [2, 4, 16] {
-            let tiled = mask_product_acc(&prepared, &masks, rows_out, lwe_n, nt);
+            let tiled = mask_product_acc(&prepared, &masks, rows_out, lwe_n, nt, &PrivateGemmX86);
             assert_eq!(seq, tiled, "k=1 must be bit-identical for nt={nt}");
         }
     }

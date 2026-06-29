@@ -42,11 +42,13 @@ mod api;
 mod common;
 mod default;
 mod delegates;
+pub mod gemm;
 mod interpolation;
 mod oep;
 mod recursion;
 
 use api::{InterpolationServerModule, RecursionServerModule};
+pub use gemm::{Gemm, PrivateGemmX86};
 pub use interpolation::InterpolationPrecomputation;
 use interpolation::InterpolationState;
 use recursion::RecursionState;
@@ -280,6 +282,10 @@ pub struct Server<BE: Backend, P: Payload<[u8; 32]>> {
     scratch_pool: Vec<ScratchOwned<BE>>,
     collapse: ServerCollapse<BE, P>,
     precomputation: ServerPrecomputation<BE>,
+    /// The GEMM backend driving the full-torus `f64` mask/body products. Defaults
+    /// to [`PrivateGemmX86`]; swap it with [`Server::with_gemm`] to plug a custom
+    /// kernel on top of the FHE backend `BE`.
+    gemm: Box<dyn Gemm>,
 }
 
 impl<BE: Backend, P: Payload<[u8; 32]>> Server<BE, P> {
@@ -287,6 +293,21 @@ impl<BE: Backend, P: Payload<[u8; 32]>> Server<BE, P> {
     /// [`Query`] in [`Query::read_from`]).
     pub fn params(&self) -> &Parameters<BE, [u8; 32], P> {
         &self.params
+    }
+
+    /// Replaces the GEMM backend used for the full-torus `f64` mask and body
+    /// products with a custom [`Gemm`] implementation, returning the server for
+    /// chaining. The default is [`PrivateGemmX86`]; this is the customization
+    /// point for a different SIMD library, a GPU offload, etc.
+    pub fn with_gemm(mut self, gemm: impl Gemm + 'static) -> Self {
+        self.gemm = Box::new(gemm);
+        self
+    }
+
+    /// The active GEMM backend, as a `&dyn Gemm` for threading into the
+    /// product helpers.
+    pub(crate) fn gemm(&self) -> &dyn Gemm {
+        &*self.gemm
     }
 }
 

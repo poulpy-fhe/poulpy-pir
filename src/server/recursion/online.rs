@@ -19,7 +19,7 @@ use crate::{
     parallel::{assign_panels, num_threads},
     payload::Payload,
     server::{
-        OnlineTimings, Server, ServerCollapse, ServerPrecomputation,
+        Gemm, OnlineTimings, Server, ServerCollapse, ServerPrecomputation,
         api::RecursionServerModule,
         common::{PreparedF64, copy_vec_znx_rows, full_torus_f64_body_product},
     },
@@ -88,6 +88,9 @@ where
             panic!("recursion respond requested for non-recursion server");
         };
         let module = self.params.module();
+        // Field-level borrow (not `self.gemm()`) so it stays disjoint from the
+        // `&mut self.scratch_pool` taken by the pooled packs below.
+        let gemm: &dyn Gemm = &*self.gemm;
 
         // Level-1 body: D·b0, packed with the offline mask precomputes → resp0.
         let rows_per_group = self.database.rows_per_physical_group();
@@ -137,6 +140,7 @@ where
                                 src0,
                                 base2k,
                                 torus_bits,
+                                gemm,
                             );
                             let mut out = Vec::with_capacity(rows_per_group);
                             for local in 0..rows_per_group {
@@ -198,6 +202,7 @@ where
             &off.resp1_precompute,
             &query.src1,
             &key1.precomp,
+            gemm,
             &mut self.scratch_pool,
         );
         timings.add_body_product("recursion.resp1.body_product", resp1_body);
@@ -219,6 +224,7 @@ where
             &resp2_precomputes,
             &query.src1,
             &key2.precomp,
+            gemm,
             &mut self.scratch_pool,
         );
         timings.add_body_product("recursion.resp2.body_product", resp2_body);

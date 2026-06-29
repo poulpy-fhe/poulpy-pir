@@ -27,7 +27,7 @@ use crate::{
     parallel::{assign_panels, num_threads, scoped_workers},
     payload::Payload,
     server::{
-        OfflineTimings, Server, ServerCollapse, ServerPrecomputation,
+        Gemm, OfflineTimings, Server, ServerCollapse, ServerPrecomputation,
         api::RecursionServerModule,
         common::{PreparedF64, QueryMask, copy_lwe_matrix_mask_rows, mask_product_to_pack},
     },
@@ -163,6 +163,7 @@ where
             let db_views = &db_views;
             let full_pack_infos = &full_pack_infos;
             let partial_res_infos = &partial_res_infos;
+            let gemm: &dyn Gemm = &*self.gemm;
             let mut slabs: Vec<&mut [GroupOut<BE>]> = Vec::with_capacity(work.len());
             let mut rest = outputs.as_mut_slice();
             for group in &work {
@@ -189,6 +190,7 @@ where
                         &db_views[w.panel],
                         q0_masks,
                         key0_mask_source,
+                        gemm,
                         &mut sc.borrow(),
                     );
                     *slot = (Some(precomputes), d);
@@ -339,6 +341,7 @@ fn compute_l1_row_group<BE>(
     row_prep: &[PreparedF64],
     q0_masks: &[QueryMask],
     key0_mask_source: &GLWEAutomorphismKeyCompressed<BE::OwnedBuf>,
+    gemm: &dyn Gemm,
     scratch: &mut ScratchArena<'_, BE>,
 ) -> (Vec<PackingPrecomputations<BE>>, [Duration; 3])
 where
@@ -357,6 +360,7 @@ where
         q0_masks,
         torus_bits,
         mask_threads,
+        gemm,
     );
     let d_mask_product = started.elapsed();
 

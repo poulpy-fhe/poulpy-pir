@@ -22,7 +22,7 @@ use crate::{
     parallel::{assign_panels, num_threads, scoped_workers},
     payload::Payload,
     server::{
-        OfflineTimings, Server, ServerCollapse, ServerPrecomputation,
+        Gemm, OfflineTimings, Server, ServerCollapse, ServerPrecomputation,
         api::InterpolationServerModule,
         common::{PreparedF64, QueryMask, mask_product_to_pack},
         interpolation::setup::server_scratch_bytes,
@@ -202,6 +202,7 @@ where
             let masks = &precomputation.masks;
             let lwe_infos = &lwe_infos;
             let precompute_metadata = &precompute_metadata;
+            let gemm = self.gemm();
 
             // Split the output buffer into group-aligned disjoint slabs.
             let mut slabs: Vec<&mut [PanelOut<BE>]> = Vec::with_capacity(work.len());
@@ -225,6 +226,7 @@ where
                         &prepared_u[w.panel],
                         masks,
                         key_mask_src,
+                        gemm,
                         &mut sc.borrow(),
                     );
                     *slot = (Some(precompute), [ua, prep, pp]);
@@ -283,6 +285,7 @@ fn compute_panel_precompute<BE>(
     prepared_u_panel: &[PreparedF64],
     masks: &[QueryMask],
     key_mask_src: &GLWEAutomorphismKeyCompressed<BE::OwnedBuf>,
+    gemm: &dyn Gemm,
     scratch: &mut ScratchArena<'_, BE>,
 ) -> (PackingPrecomputations<BE>, Duration, Duration, Duration)
 where
@@ -294,8 +297,15 @@ where
     for<'b> BE::BufMut<'b>: HostDataMut,
 {
     let t = Instant::now();
-    let product =
-        mask_product_to_pack(module, lwe_infos, prepared_u_panel, masks, torus_bits, mask_threads);
+    let product = mask_product_to_pack(
+        module,
+        lwe_infos,
+        prepared_u_panel,
+        masks,
+        torus_bits,
+        mask_threads,
+        gemm,
+    );
     let ua = t.elapsed();
 
     // Per-call aggregate (was a shared buffer reused across panels) — this is
