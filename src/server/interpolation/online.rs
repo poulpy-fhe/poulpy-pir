@@ -24,7 +24,7 @@ use crate::{
     server::{
         Gemm, OnlineTimings, Server, ServerCollapse, ServerPrecomputation,
         api::InterpolationServerModule,
-        common::{PreparedF64, full_torus_f64_body_product},
+        common::{PreparedF64, full_torus_f64_body_product, full_torus_f64_body_product_batch},
         interpolation::setup::server_scratch_bytes,
     },
 };
@@ -194,6 +194,156 @@ where
             Response::Interpolation(InterpolationResponse::new(selected)),
             timings,
         )
+    }
+
+    /// ONLINE (batched): answer `nq` interpolation queries against the same
+    /// database in one pass. The per-panel body product `U·[b^0 … b^{nq-1}]` runs
+    /// as a single i16×f64 GEMM — each `U` panel read once for the whole batch
+    /// (the win over `nq` separate memory-bound GEMVs). The pack and the per-query
+    /// Horner reduction stay per-query (they can't be batched). Returns one
+    /// [`Response`] per query, in input order — identical results to calling
+    /// [`respond_interpolation`](Self::respond_interpolation) on each query.
+    pub(crate) fn respond_interpolation_batch(
+        &mut self,
+        queries: &[&InterpolationQuery<BE>],
+    ) -> Vec<Response<BE>> {
+        let nq = queries.len();
+        assert!(nq > 0, "empty interpolation batch");
+
+        let ServerPrecomputation::Interpolation(precomputation) = &self.precomputation else {
+            panic!("interpolation respond requested for non-interpolation server");
+        };
+        assert!(
+            !precomputation.precomputations.is_empty(),
+            "call offline() before respond()"
+        );
+        let module = self.params.module();
+        let glwe_pack = self.params.glwe_pack();
+        let ServerCollapse::Interpolation(state) = &self.collapse else {
+            panic!("interpolation respond requested for non-interpolation server");
+        };
+        let panels = state.interpolation.num_panels();
+
+        // Per-query key precompute (sequential; consumes `self.scratch`).
+        let key_precomputations: Vec<_> = queries
+            .iter()
+            .map(|query| {
+                module.pack_keys_precompute(
+                    query.keys.key_g(),
+                    query.keys.key_h(),
+                    self.params.baby_size(),
+                    &mut self.scratch.borrow(),
+                )
+            })
+            .collect();
+
+        let body_size = self.params.size_at(self.params.base2k());
+        let out_base2k = self.params.base2k();
+        let body_base2k = self.params.matmul_base2k();
+        let torus_bits = self.params.k();
+        let k = self.layout.block_cols(self.params.n());
+        let nthreads = num_threads(panels);
+
+        while self.scratch_pool.len() < nthreads {
+            self.scratch_pool
+                .push(ScratchOwned::<BE>::alloc(server_scratch_bytes(&self.params)));
+        }
+
+        // One panel per work item: a batched body product (`nq` outputs) followed
+        // by `nq` independent packs. Output is `Vec<GLWE>` of length `nq`,
+        // panel-major; written by panel index ⇒ bit-identical to sequential order.
+        type PanelOut<BE> = Option<Vec<GLWE<<BE as Backend>::OwnedBuf>>>;
+        let mut outputs: Vec<PanelOut<BE>> = (0..panels).map(|_| None).collect();
+        let work = assign_panels(panels, k, nthreads);
+
+        {
+            let prepared_u = &precomputation.prepared_u;
+            let precomputes = &precomputation.precomputations;
+            let key_precomps = &key_precomputations;
+            let glwe_pack_ref = &glwe_pack;
+            // Field-level borrow (not `self.gemm()`) so it stays disjoint from the
+            // `&mut self.scratch_pool` taken just below.
+            let gemm: &dyn Gemm = &*self.gemm;
+            // Shared `U` panels, per-query one-hot bodies.
+            let blocks_per_query: Vec<&[GLWECompressed<BE::OwnedBuf>]> =
+                queries.iter().map(|qy| qy.common.blocks.as_slice()).collect();
+            let blocks_per_query = &blocks_per_query;
+
+            let mut out_slabs: Vec<&mut [PanelOut<BE>]> = Vec::with_capacity(work.len());
+            let mut rest = outputs.as_mut_slice();
+            for group in &work {
+                let (head, tail) = rest.split_at_mut(group.len());
+                out_slabs.push(head);
+                rest = tail;
+            }
+            let scratch_slabs: Vec<&mut ScratchOwned<BE>> =
+                self.scratch_pool[..work.len()].iter_mut().collect();
+
+            scoped_workers_pooled::<BE, PanelOut<BE>, _>(
+                out_slabs,
+                scratch_slabs,
+                &work,
+                |slab, group, sc| {
+                    for (slot, w) in slab.iter_mut().zip(group.iter()) {
+                        let panel = w.panel;
+                        let mut out_bodies: Vec<VecZnx<BE::OwnedBuf>> =
+                            (0..nq).map(|_| module.vec_znx_alloc(1, body_size)).collect();
+                        full_torus_f64_body_product_batch::<BE>(
+                            &mut out_bodies,
+                            out_base2k,
+                            &prepared_u[panel],
+                            blocks_per_query,
+                            body_base2k,
+                            torus_bits,
+                            gemm,
+                        );
+                        let mut packed_q: Vec<GLWE<BE::OwnedBuf>> = Vec::with_capacity(nq);
+                        for (qi, body) in out_bodies.iter().enumerate() {
+                            let mut packed = module.glwe_alloc_from_infos(glwe_pack_ref);
+                            module.pack(
+                                &mut packed,
+                                body,
+                                &precomputes[panel],
+                                &key_precomps[qi],
+                                1,
+                                &mut sc.borrow(),
+                            );
+                            packed_q.push(packed);
+                        }
+                        *slot = Some(packed_q);
+                    }
+                },
+            );
+        }
+
+        // Transpose panel-major outputs → per-query packed-coefficient vectors.
+        let mut per_query: Vec<Vec<GLWE<BE::OwnedBuf>>> =
+            (0..nq).map(|_| Vec::with_capacity(panels)).collect();
+        for panel_out in &mut outputs {
+            let panel_vec = panel_out.take().expect("panel worker did not fill its slot");
+            for (qi, glwe) in panel_vec.into_iter().enumerate() {
+                per_query[qi].push(glwe);
+            }
+        }
+
+        // Per-query Horner reduction at each query's GGSW root.
+        let mut responses = Vec::with_capacity(nq);
+        for (qi, packed_coeffs) in per_query.into_iter().enumerate() {
+            let root_prepared =
+                state
+                    .interpolation
+                    .prepare_root(module, &queries[qi].root, &mut self.scratch);
+            let mut selected = module.glwe_alloc_from_infos(&glwe_pack);
+            state.interpolation.reduce(
+                module,
+                &packed_coeffs,
+                &root_prepared,
+                &mut selected,
+                &mut self.scratch,
+            );
+            responses.push(Response::Interpolation(InterpolationResponse::new(selected)));
+        }
+        responses
     }
 }
 

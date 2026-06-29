@@ -46,6 +46,35 @@ pub trait Gemm: Send + Sync {
     ) {
         default_gemv_i16_f64_add(acc, u, b, rows_out, rows_in)
     }
+
+    /// GEMM `acc[rows_out × n] += U[rows_out × rows_in] · B[rows_in × n]`, with
+    /// `U` row-major **`i16`** and `B`/`acc` row-major `f64`. This is the
+    /// **batched** online body product: `n` is the number of queries in the
+    /// batch, so one `U` read is amortized over `n` query bodies (the batch win
+    /// over `n` separate memory-bound GEMVs).
+    ///
+    /// Default: `n == 1` delegates to the memory-bound [`Self::gemv_i16_f64_add`];
+    /// for `n > 1` the panel is compute-bound, so `U` is widened to `f64` once and
+    /// fed to [`Self::gemm_f64_add`] (the blocked dense kernel) — mirroring the
+    /// offline mask product. A backend with a fused `i16·f64` matmul (e.g. a
+    /// device kernel) may override this directly.
+    fn gemm_i16_f64_add(
+        &self,
+        acc: &mut [f64],
+        u: &[i16],
+        b: &[f64],
+        rows_out: usize,
+        rows_in: usize,
+        n: usize,
+    ) {
+        if n == 1 {
+            self.gemv_i16_f64_add(acc, u, b, rows_out, rows_in);
+            return;
+        }
+        let mut wide = vec![0.0f64; rows_out * rows_in];
+        widen_i16_to_f64(u, &mut wide);
+        self.gemm_f64_add(acc, &wide, b, rows_out, rows_in, n);
+    }
 }
 
 /// Default GEMM backend: the dense product dispatches to `private-gemm-x86`
@@ -263,9 +292,58 @@ unsafe fn gemv_i16_f64_add_avx512(
     }
 }
 
+/// `dst[i] = src[i] as f64`, AVX2-accelerated when available (the AVX backend
+/// this crate runs on guarantees AVX2; the scalar path is a portability floor).
+/// Shared by the prepared-panel widen ([`crate::server::common`]) and the default
+/// batched [`Gemm::gemm_i16_f64_add`].
+pub(super) fn widen_i16_to_f64(src: &[i16], dst: &mut [f64]) {
+    debug_assert_eq!(src.len(), dst.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: avx2 confirmed at runtime; lengths checked equal above.
+            unsafe { widen_i16_to_f64_avx2(src, dst) };
+            return;
+        }
+    }
+    for (d, &s) in dst.iter_mut().zip(src) {
+        *d = s as f64;
+    }
+}
+
+/// AVX2 i16→f64: 8 lanes/iteration via `cvtepi16_epi32` then two `cvtepi32_pd`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn widen_i16_to_f64_avx2(src: &[i16], dst: &mut [f64]) {
+    use std::arch::x86_64::*;
+    let n = src.len();
+    let sp = src.as_ptr();
+    let dp = dst.as_mut_ptr();
+    let mut i = 0;
+    while i + 8 <= n {
+        // 8 × i16 → 8 × i32 (sign-extended)
+        let v16 = unsafe { _mm_loadu_si128(sp.add(i).cast::<__m128i>()) };
+        let v32 = _mm256_cvtepi16_epi32(v16);
+        // 8 × i32 → two lanes of 4 × f64
+        let lo = _mm256_castsi256_si128(v32);
+        let hi = _mm256_extracti128_si256::<1>(v32);
+        let f_lo = _mm256_cvtepi32_pd(lo);
+        let f_hi = _mm256_cvtepi32_pd(hi);
+        unsafe {
+            _mm256_storeu_pd(dp.add(i), f_lo);
+            _mm256_storeu_pd(dp.add(i + 4), f_hi);
+        }
+        i += 8;
+    }
+    while i < n {
+        unsafe { *dp.add(i) = *sp.add(i) as f64 };
+        i += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::default_gemv_i16_f64_add;
+    use super::{Gemm, PrivateGemmX86, default_gemv_i16_f64_add};
 
     /// Strict left-fold reference for `acc += U · b`.
     fn scalar_gemv(acc: &mut [f64], u: &[i16], b: &[f64], rows_in: usize) {
@@ -275,6 +353,20 @@ mod tests {
                 s += u[i * rows_in + j] as f64 * b[j];
             }
             *a += s;
+        }
+    }
+
+    /// Strict reference for the batched GEMM `acc[m×n] += U[m×k] · B[k×n]`,
+    /// row-major.
+    fn scalar_gemm_i16(acc: &mut [f64], u: &[i16], b: &[f64], m: usize, k: usize, n: usize) {
+        for i in 0..m {
+            for col in 0..n {
+                let mut s = 0.0f64;
+                for p in 0..k {
+                    s += u[i * k + p] as f64 * b[p * n + col];
+                }
+                acc[i * n + col] += s;
+            }
         }
     }
 
@@ -310,6 +402,37 @@ mod tests {
                     (w - g).abs() / scale < 1e-9,
                     "rows_in={rows_in}: {w} vs {g}"
                 );
+            }
+        }
+    }
+
+    /// The batched `gemm_i16_f64_add` (default = widen + dense GEMM for `n > 1`,
+    /// GEMV delegation for `n == 1`) must match the scalar matrix×matrix
+    /// reference. `n` is the query-batch width.
+    #[test]
+    fn batched_gemm_i16_matches_scalar_reference() {
+        let g = PrivateGemmX86;
+        let (rows_out, rows_in) = (7usize, 40usize);
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let u: Vec<i16> = (0..rows_out * rows_in).map(|_| (next() >> 48) as i16).collect();
+        for n in [1usize, 2, 3, 4, 8, 16] {
+            // B: rows_in × n, torus reals in [-0.5, 0.5).
+            let b: Vec<f64> = (0..rows_in * n)
+                .map(|_| (next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5)
+                .collect();
+            let mut want = vec![0.5f64; rows_out * n];
+            let mut got = want.clone();
+            scalar_gemm_i16(&mut want, &u, &b, rows_out, rows_in, n);
+            g.gemm_i16_f64_add(&mut got, &u, &b, rows_out, rows_in, n);
+            for (w, gv) in want.iter().zip(&got) {
+                let scale = w.abs().max(1.0);
+                assert!((w - gv).abs() / scale < 1e-9, "n={n}: {w} vs {gv}");
             }
         }
     }

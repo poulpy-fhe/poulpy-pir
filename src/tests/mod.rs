@@ -3,4 +3,5 @@ mod database_layout;
 mod mod_p_encoder;
 mod mod_p_one_hot;
 mod serialization_roundtrip;
+mod server_batch;
 mod server_roundtrip;

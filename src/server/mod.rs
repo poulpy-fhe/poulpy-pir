@@ -417,4 +417,41 @@ where
             Query::Recursion(q) => self.respond_recursion(q),
         }
     }
+
+    /// ONLINE (batched): answer a batch of queries against the same database,
+    /// returning one [`Response`] per query in input order.
+    ///
+    /// For **interpolation** (InsPIRe) the per-panel body product is computed as a
+    /// single i16×f64 GEMM over the whole batch — each database panel is read once
+    /// for all queries (the win over `respond`-per-query), while the pack and
+    /// Horner reduction remain per-query. Results are identical to calling
+    /// [`respond`](Self::respond) on each query individually.
+    ///
+    /// For **recursion** (InsPIRe²) the multi-level online pipeline is not yet
+    /// batch-accelerated, so this falls back to answering each query sequentially
+    /// (correct, same result, no speedup).
+    ///
+    /// All queries in the batch must use the same construction as the server;
+    /// passing a query of the other variant panics.
+    pub fn respond_batch(&mut self, queries: &[Query<BE>]) -> Vec<Response<BE>> {
+        if queries.is_empty() {
+            return Vec::new();
+        }
+        let all_interpolation = queries
+            .iter()
+            .all(|q| matches!(q, Query::Interpolation(_)));
+        if all_interpolation {
+            let interp: Vec<&InterpolationQuery<BE>> = queries
+                .iter()
+                .map(|q| match q {
+                    Query::Interpolation(q) => q,
+                    Query::Recursion(_) => unreachable!("checked all-interpolation above"),
+                })
+                .collect();
+            return self.respond_interpolation_batch(&interp);
+        }
+        // Recursion (or a mixed batch): no batched fast path yet — answer one by
+        // one. `respond` panics on a query that mismatches the server construction.
+        queries.iter().map(|q| self.respond(q)).collect()
+    }
 }

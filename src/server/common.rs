@@ -161,54 +161,7 @@ impl<'a> PreparedF64<'a> {
     /// footprint is one panel per worker, not the whole prepared cache.
     fn widen_into(&self, dst: &mut Vec<f64>) {
         dst.resize(self.values.len(), 0.0);
-        widen_i16_to_f64(&self.values, dst);
-    }
-}
-
-/// `dst[i] = src[i] as f64`, AVX2-accelerated when available (the AVX backend
-/// this crate runs on guarantees AVX2; the scalar path is a portability floor).
-fn widen_i16_to_f64(src: &[i16], dst: &mut [f64]) {
-    debug_assert_eq!(src.len(), dst.len());
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::arch::is_x86_feature_detected!("avx2") {
-            // SAFETY: avx2 confirmed at runtime; lengths checked equal above.
-            unsafe { widen_i16_to_f64_avx2(src, dst) };
-            return;
-        }
-    }
-    for (d, &s) in dst.iter_mut().zip(src) {
-        *d = s as f64;
-    }
-}
-
-/// AVX2 i16→f64: 8 lanes/iteration via `cvtepi16_epi32` then two `cvtepi32_pd`.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn widen_i16_to_f64_avx2(src: &[i16], dst: &mut [f64]) {
-    use std::arch::x86_64::*;
-    let n = src.len();
-    let sp = src.as_ptr();
-    let dp = dst.as_mut_ptr();
-    let mut i = 0;
-    while i + 8 <= n {
-        // 8 × i16 → 8 × i32 (sign-extended)
-        let v16 = unsafe { _mm_loadu_si128(sp.add(i).cast::<__m128i>()) };
-        let v32 = _mm256_cvtepi16_epi32(v16);
-        // 8 × i32 → two lanes of 4 × f64
-        let lo = _mm256_castsi256_si128(v32);
-        let hi = _mm256_extracti128_si256::<1>(v32);
-        let f_lo = _mm256_cvtepi32_pd(lo);
-        let f_hi = _mm256_cvtepi32_pd(hi);
-        unsafe {
-            _mm256_storeu_pd(dp.add(i), f_lo);
-            _mm256_storeu_pd(dp.add(i + 4), f_hi);
-        }
-        i += 8;
-    }
-    while i < n {
-        unsafe { *dp.add(i) = *sp.add(i) as f64 };
-        i += 1;
+        crate::server::gemm::widen_i16_to_f64(&self.values, dst);
     }
 }
 
@@ -400,6 +353,101 @@ pub(super) fn full_torus_f64_body_product<BE>(
     }
 
     encode_torus_body_f64::<BE>(out, out_base2k, &acc, rows_out, torus_bits);
+}
+
+/// Batched body product: `out_bodies[q] = sum_bc U_bc · b^q_bc` over a query
+/// batch sharing the same `prepared` (`U_bc`) panels. Each block contributes a
+/// single i16×f64 GEMM whose RHS stacks the `Q` queries' decoded bodies as
+/// columns ([`Gemm::gemm_i16_f64_add`]), so every `U_bc` panel is read once and
+/// amortized over the whole batch — the win over `Q` separate memory-bound GEMVs.
+/// The per-query repack is **not** batched: the caller packs each `out_bodies[q]`
+/// independently.
+pub(super) fn full_torus_f64_body_product_batch<BE>(
+    out_bodies: &mut [VecZnx<BE::OwnedBuf>],
+    out_base2k: usize,
+    prepared: &[PreparedF64],
+    bodies_per_query: &[&[GLWECompressed<BE::OwnedBuf>]],
+    body_base2k: usize,
+    torus_bits: usize,
+    gemm: &dyn Gemm,
+) where
+    BE: Backend<OwnedBuf = Vec<u8>> + ReimArith,
+{
+    let q = out_bodies.len();
+    assert_eq!(
+        bodies_per_query.len(),
+        q,
+        "output and query-body batch widths differ"
+    );
+    assert!(q > 0, "cannot run an empty body-product batch");
+    assert!(!prepared.is_empty(), "cannot accumulate an empty body product");
+    let nblocks = prepared.len();
+    for bodies in bodies_per_query {
+        assert_eq!(
+            bodies.len(),
+            nblocks,
+            "per-query block count differs from prepared panels"
+        );
+    }
+
+    let rows_out = prepared[0].rows_out;
+    // `acc` and `rhs` are row-major `rows × q` (the query index is the fastest
+    // axis), the column layout `gemm_i16_f64_add` contracts against.
+    let mut acc = vec![0.0f64; rows_out * q];
+    let mut rhs: Vec<f64> = Vec::new();
+    let mut tmp: Vec<i64> = Vec::new();
+
+    for bc in 0..nblocks {
+        let u = &prepared[bc];
+        assert_eq!(u.rows_out, rows_out, "body product output rows mismatch");
+        rhs.clear();
+        rhs.resize(u.rows_in * q, 0.0);
+        for (qi, bodies) in bodies_per_query.iter().enumerate() {
+            decode_torus_body_into_col(
+                &mut rhs,
+                qi,
+                q,
+                bodies[bc].data(),
+                u.rows_in,
+                body_base2k,
+                torus_bits,
+                &mut tmp,
+            );
+        }
+        gemm.gemm_i16_f64_add(&mut acc, &u.values, &rhs, rows_out, u.rows_in, q);
+    }
+
+    // Per-query repack: gather column `qi` of `acc` (de-interleave) and encode it
+    // into `out_bodies[qi]`.
+    let mut col = vec![0.0f64; rows_out];
+    for qi in 0..q {
+        for r in 0..rows_out {
+            col[r] = acc[r * q + qi];
+        }
+        encode_torus_body_f64::<BE>(&mut out_bodies[qi], out_base2k, &col, rows_out, torus_bits);
+    }
+}
+
+/// Decodes the single body column of `body` into column `col` of a row-major
+/// `rows × ncols` buffer (`rhs[r*ncols + col]`) as torus reals in `[-0.5, 0.5)`.
+/// `tmp` is reused scratch sized to the ring degree.
+#[allow(clippy::too_many_arguments)]
+fn decode_torus_body_into_col(
+    rhs: &mut [f64],
+    col: usize,
+    ncols: usize,
+    body: &VecZnx<Vec<u8>>,
+    rows: usize,
+    base2k: usize,
+    torus_bits: usize,
+    tmp: &mut Vec<i64>,
+) {
+    let scale = torus_modulus_f64(torus_bits).recip();
+    tmp.resize(body.n(), 0);
+    body.decode_vec_i64(base2k, 0, torus_bits, tmp);
+    for r in 0..rows {
+        rhs[r * ncols + col] = tmp[r] as f64 * scale;
+    }
 }
 
 fn decode_torus_mask_f64(
