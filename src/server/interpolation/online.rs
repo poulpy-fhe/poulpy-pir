@@ -209,9 +209,10 @@ where
     pub(crate) fn respond_interpolation_batch(
         &mut self,
         queries: &[&InterpolationQuery<BE>],
-    ) -> Vec<Response<BE>> {
+    ) -> (Vec<Response<BE>>, OnlineTimings) {
         let nq = queries.len();
         assert!(nq > 0, "empty interpolation batch");
+        let mut timings = OnlineTimings::default();
 
         let ServerPrecomputation::Interpolation(precomputation) = &self.precomputation else {
             panic!("interpolation respond requested for non-interpolation server");
@@ -228,6 +229,7 @@ where
         let panels = state.interpolation.num_panels();
 
         // Per-query key precompute (sequential; consumes `self.scratch`).
+        let started = Instant::now();
         let key_precomputations: Vec<_> = queries
             .iter()
             .map(|query| {
@@ -239,6 +241,7 @@ where
                 )
             })
             .collect();
+        timings.add_key_precompute("interpolation.batch.key_precompute", started.elapsed());
 
         let body_size = self.params.size_at(self.params.base2k());
         let out_base2k = self.params.base2k();
@@ -261,6 +264,7 @@ where
         let mut outputs: Vec<PanelOut<BE>> = (0..panels).map(|_| None).collect();
         let work = assign_panels(panels, k, nthreads);
 
+        let started = Instant::now();
         {
             let prepared_u = &precomputation.prepared_u;
             let precomputes = &precomputation.precomputations;
@@ -324,6 +328,9 @@ where
             );
         }
 
+        timings.add_body_product("interpolation.batch.body_product+pack", started.elapsed());
+        let started = Instant::now();
+
         // Transpose panel-major outputs → per-query packed-coefficient vectors.
         let mut per_query: Vec<Vec<GLWE<BE::OwnedBuf>>> =
             (0..nq).map(|_| Vec::with_capacity(panels)).collect();
@@ -355,7 +362,8 @@ where
                 selected,
             )));
         }
-        responses
+        timings.add_reduce("interpolation.batch.reduce", started.elapsed());
+        (responses, timings)
     }
 }
 

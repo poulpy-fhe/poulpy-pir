@@ -25,7 +25,7 @@ use std::time::Instant;
 
 use poulpy_cpu_avx512::FFT64Avx512;
 use poulpy_pir::{
-    client::{Client, Response},
+    client::Client,
     config::{Collapse, Config, DefaultPirConfig32B, DefaultPirParameters32B},
     database::DatabaseLayout,
     payload::Payload,
@@ -163,25 +163,52 @@ where
         println!("  {:<30}: {:?}", phase.name(), phase.duration());
     }
 
-    // ---- CLIENT: build the query for the payload index. ----
-    let t = Instant::now();
-    let (query, state) = client.query(item_index);
-    println!("QUERY                        : {:?}", t.elapsed());
+    // ---- CLIENT: build `batch` queries (batch = 1 is the single-query case).
+    // Items are spread across the DB so they land in different panels.
+    let stride = (capacity / batch).max(1);
+    let items: Vec<usize> = (0..batch)
+        .map(|k| (item_index + k * stride) % capacity)
+        .collect();
 
-    // ---- SERVER: answer (timed, per-phase). ----
-    let (response, online): (Response<BE>, _) = server.respond_timed(&query);
-    println!("ONLINE total                 : {:?}", online.total());
+    let t = Instant::now();
+    let mut queries = Vec::with_capacity(batch);
+    let mut states = Vec::with_capacity(batch);
+    for &item in &items {
+        let (q, st) = client.query(item);
+        queries.push(q);
+        states.push(st);
+    }
+    println!("QUERY (build {batch})            : {:?}", t.elapsed());
+
+    // ---- SERVER: answer the whole batch at once (nq = 1 is the special case),
+    // with the full per-phase timing breakdown summed over the batch. For
+    // interpolation each DB panel is read once for all queries (one i16×f64 GEMM);
+    // recursion has no batched fast path yet and sums its sequential per-query work.
+    let (responses, online) = server.respond_batch_timed(&queries);
+    println!("ONLINE total ({batch} q)          : {:?}", online.total());
     for phase in online.phases() {
         println!("  {:<30}: {:?}", phase.name(), phase.duration());
     }
+    if batch > 1 {
+        println!(
+            "  per query (avg)            : {:?}",
+            online.total() / batch as u32
+        );
+        println!(
+            "  throughput                 : {:.1} queries/s",
+            batch as f64 / online.total().as_secs_f64()
+        );
+    }
 
-    // ---- WIRE SIZES: serialize the transmitted messages to measure bytes. ----
-    // Both are repacked to base2k=63 by `write_to` (the real on-wire encoding).
+    // ---- WIRE SIZES: serialize the first query/response (representative). Both
+    // are repacked to base2k=63 by `write_to` (the real on-wire encoding). ----
     let module = server.params().module();
     let mut qbuf = Vec::new();
-    query.write_to(module, &mut qbuf).expect("serialize query");
+    queries[0]
+        .write_to(module, &mut qbuf)
+        .expect("serialize query");
     let mut rbuf = Vec::new();
-    response
+    responses[0]
         .write_to(module, &mut rbuf)
         .expect("serialize response");
     println!(
@@ -195,69 +222,25 @@ where
         format_bytes(rbuf.len() as f64)
     );
 
-    // ---- CLIENT: decrypt + decode the payload. ----
+    // ---- CLIENT: decrypt + verify every response against the plaintext DB. ----
     let t = Instant::now();
-    let got = client.decode(&response, &state);
-    println!("DECRYPT                      : {:?}", t.elapsed());
-    let selected = state.address();
+    let mut ok = 0usize;
+    for ((resp, st), &item) in responses.iter().zip(&states).zip(&items) {
+        if client.decode(resp, st) == server.get(item) {
+            ok += 1;
+        }
+    }
+    println!("DECRYPT (all {batch})            : {:?}", t.elapsed());
+
+    // Noise estimate on the first response.
+    let selected = states[0].address();
     let expected_record = server.database().record(selected.column, selected.matrix);
-    let noise = client.noise(&response, &state, &expected_record);
+    let noise = client.noise(&responses[0], &states[0], &expected_record);
     println!("NOISE log2(max)              : {:.3}", noise.max_log2());
     println!("NOISE log2(std)              : {:.3}", noise.std_log2());
 
-    let want = server.get(item_index); // ground truth from the server's plaintext DB
-    println!(" got : {:?} \n want: {:?}", got, want);
-    println!(
-        "\nretrieved payload {item_index}      : {}",
-        if got == want { "OK" } else { "MISMATCH" }
-    );
-    assert_eq!(got, want, "{collapse:?} failed to recover the payload");
-
-    // ---- BATCH: answer `batch` queries at once via `respond_batch`. For
-    // interpolation each DB panel is read once for the whole batch (one i16×f64
-    // GEMM), so the online cost amortizes; recursion falls back to sequential.
-    if batch > 1 {
-        println!("\n---- batch of {batch} queries ----");
-        // Spread the items across the DB so they land in different panels.
-        let stride = (capacity / batch).max(1);
-        let items: Vec<usize> = (0..batch)
-            .map(|k| (item_index + k * stride) % capacity)
-            .collect();
-
-        let t = Instant::now();
-        let mut queries = Vec::with_capacity(batch);
-        let mut states = Vec::with_capacity(batch);
-        for &item in &items {
-            let (q, st) = client.query(item);
-            queries.push(q);
-            states.push(st);
-        }
-        println!("QUERY (build {batch})            : {:?}", t.elapsed());
-
-        let t = Instant::now();
-        let responses = server.respond_batch(&queries);
-        let batch_dt = t.elapsed();
-
-        // Decode + verify every response against the plaintext DB.
-        let mut ok = 0usize;
-        for ((resp, st), &item) in responses.iter().zip(&states).zip(&items) {
-            if client.decode(resp, st) == server.get(item) {
-                ok += 1;
-            }
-        }
-
-        println!("ONLINE batch total           : {batch_dt:?}");
-        println!(
-            "  per query (avg)            : {:?}",
-            batch_dt / batch as u32
-        );
-        println!(
-            "  throughput                 : {:.1} queries/s",
-            batch as f64 / batch_dt.as_secs_f64()
-        );
-        println!("BATCH RESULT                 : {ok}/{batch} decoded OK");
-        assert_eq!(ok, batch, "{collapse:?} batch decode mismatch");
-    }
+    println!("RESULT                       : {ok}/{batch} decoded OK");
+    assert_eq!(ok, batch, "{collapse:?} batch decode mismatch");
 }
 
 fn print_layout_summary<P>(

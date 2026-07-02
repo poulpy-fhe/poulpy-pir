@@ -241,6 +241,28 @@ impl OnlineTimings {
         self.reduce += duration;
         self.record_phase(name, duration);
     }
+
+    /// Fold another breakdown into this one, summing like-named phases (and the
+    /// typed buckets). Used to aggregate a batch's per-query timings into one
+    /// report so `phases()`/`total()` reflect the whole batch.
+    pub(crate) fn accumulate(&mut self, other: &OnlineTimings) {
+        for p in &other.phases {
+            match self.phases.iter_mut().find(|e| e.name == p.name) {
+                Some(existing) => existing.duration += p.duration,
+                None => self.phases.push(*p),
+            }
+        }
+        self.key_precompute += other.key_precompute;
+        self.prepare_db += other.prepare_db;
+        self.mask_product += other.mask_product;
+        self.body_product += other.body_product;
+        self.mask_prep += other.mask_prep;
+        self.pack_precompute += other.pack_precompute;
+        self.pack += other.pack;
+        self.decompose += other.decompose;
+        self.reduce_precompute += other.reduce_precompute;
+        self.reduce += other.reduce;
+    }
 }
 
 // =============================================================================
@@ -434,8 +456,20 @@ where
     /// All queries in the batch must use the same construction as the server;
     /// passing a query of the other variant panics.
     pub fn respond_batch(&mut self, queries: &[Query<BE>]) -> Vec<Response<BE>> {
+        self.respond_batch_timed(queries).0
+    }
+
+    /// ONLINE (batched) with an aggregated per-phase timing breakdown summed over
+    /// the whole batch (like [`respond_timed`](Self::respond_timed) but for a
+    /// batch). Interpolation uses the batched i16×f64 GEMM path (each `U` panel
+    /// read once for all queries); recursion has no batched fast path yet, so it
+    /// answers each query sequentially and sums the per-query timings.
+    pub fn respond_batch_timed(
+        &mut self,
+        queries: &[Query<BE>],
+    ) -> (Vec<Response<BE>>, OnlineTimings) {
         if queries.is_empty() {
-            return Vec::new();
+            return (Vec::new(), OnlineTimings::default());
         }
         let all_interpolation = queries.iter().all(|q| matches!(q, Query::Interpolation(_)));
         if all_interpolation {
@@ -448,8 +482,26 @@ where
                 .collect();
             return self.respond_interpolation_batch(&interp);
         }
-        // Recursion (or a mixed batch): no batched fast path yet — answer one by
-        // one. `respond` panics on a query that mismatches the server construction.
-        queries.iter().map(|q| self.respond(q)).collect()
+        let all_recursion = queries.iter().all(|q| matches!(q, Query::Recursion(_)));
+        if all_recursion {
+            let rec: Vec<&RecursionQuery<BE>> = queries
+                .iter()
+                .map(|q| match q {
+                    Query::Recursion(q) => q,
+                    Query::Interpolation(_) => unreachable!("checked all-recursion above"),
+                })
+                .collect();
+            return self.respond_recursion_batch(&rec);
+        }
+        // Mixed batch (both constructions): no batched fast path — answer one by one
+        // and sum the per-query timings so the report still covers every step.
+        let mut responses = Vec::with_capacity(queries.len());
+        let mut timings = OnlineTimings::default();
+        for q in queries {
+            let (resp, t) = self.respond_timed(q);
+            responses.push(resp);
+            timings.accumulate(&t);
+        }
+        (responses, timings)
     }
 }
