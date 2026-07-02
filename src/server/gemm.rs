@@ -71,9 +71,23 @@ pub trait Gemm: Send + Sync {
             self.gemv_i16_f64_add(acc, u, b, rows_out, rows_in);
             return;
         }
-        let mut wide = vec![0.0f64; rows_out * rows_in];
-        widen_i16_to_f64(u, &mut wide);
-        self.gemm_f64_add(acc, &wide, b, rows_out, rows_in, n);
+        // Tile over output rows so the widened f64 panel is bounded to one tile
+        // instead of the whole `rows_out × rows_in` block. Materializing the full
+        // block as f64 is 4× the i16 DB and, replicated per worker thread, blows
+        // memory for large panels. Each tile is an independent row-block of the
+        // GEMM, so the accumulation is exact.
+        const ROW_TILE: usize = 512;
+        let tile_rows = ROW_TILE.min(rows_out.max(1));
+        let mut wide = vec![0.0f64; tile_rows * rows_in];
+        let mut r = 0;
+        while r < rows_out {
+            let rt = ROW_TILE.min(rows_out - r);
+            let u_tile = &u[r * rows_in..(r + rt) * rows_in];
+            let wide_tile = &mut wide[..rt * rows_in];
+            widen_i16_to_f64(u_tile, wide_tile);
+            self.gemm_f64_add(&mut acc[r * n..(r + rt) * n], wide_tile, b, rt, rows_in, n);
+            r += rt;
+        }
     }
 }
 

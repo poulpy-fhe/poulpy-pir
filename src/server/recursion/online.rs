@@ -66,7 +66,7 @@ where
         queries: &[&RecursionQuery<BE>],
     ) -> (Vec<Response<BE>>, OnlineTimings) {
         assert!(!queries.is_empty(), "empty recursion batch");
-        let (size, base2k, torus_bits, t, gamma0) = {
+        let (size, base2k, torus_bits, t, gamma0, n) = {
             let params = &self.params;
             let Collapse::Recursion { gamma0, .. } = params.collapse() else {
                 panic!("Recursion respond requires Collapse::Recursion parameters");
@@ -77,23 +77,40 @@ where
                 params.k(),
                 self.database.t(),
                 gamma0,
+                params.n(),
             )
         };
 
+        // The batched level-1 body select holds `chunk × t` bodies
+        // (`VecZnx(1, size)`) at once, so cap `chunk` to keep that working set
+        // within a memory budget: a bigger DB (larger `t`) simply uses a smaller
+        // chunk. Each chunk still streams the DB once for its GEMM — the batch win
+        // — so `nq/chunk` DB passes instead of `nq`. Materializing every query's
+        // bodies at once (`nq × t`) is what OOMs on large batches.
+        let bytes_per_body = n.saturating_mul(size).saturating_mul(8);
+        let per_query_bytes = t.saturating_mul(bytes_per_body).max(1);
+        const BODY_BUDGET: usize = 2 << 30; // ~2 GiB working set for level-1 bodies
+        let chunk = (BODY_BUDGET / per_query_bytes).clamp(1, queries.len());
+
         let mut timings = OnlineTimings::default();
-
-        // Level-1 body `D·b0` for every query, as one GEMM per DB panel.
-        let started = Instant::now();
-        let all_bodies = self.recursion_l1_bodies(queries, size, base2k, torus_bits, t, gamma0);
-        timings.add_body_product("recursion.l1.body_product", started.elapsed());
-
-        // Per-query FHE finish (pack / decompose / resp1 / resp2), timings summed.
         let mut responses = Vec::with_capacity(queries.len());
-        for (query, bodies) in queries.iter().zip(all_bodies) {
-            let mut per_query = OnlineTimings::default();
-            let response = self.recursion_finish_from_bodies(query, bodies, &mut per_query);
-            timings.accumulate(&per_query);
-            responses.push(response);
+        for chunk_queries in queries.chunks(chunk) {
+            let mut chunk_timings = OnlineTimings::default();
+
+            // Level-1 body `D·b0` for this chunk, as one GEMM per DB panel.
+            let started = Instant::now();
+            let all_bodies =
+                self.recursion_l1_bodies(chunk_queries, size, base2k, torus_bits, t, gamma0);
+            chunk_timings.add_body_product("recursion.l1.body_product", started.elapsed());
+
+            // Per-query FHE finish (pack / decompose / resp1 / resp2).
+            for (query, bodies) in chunk_queries.iter().zip(all_bodies) {
+                let mut per_query = OnlineTimings::default();
+                let response = self.recursion_finish_from_bodies(query, bodies, &mut per_query);
+                chunk_timings.accumulate(&per_query);
+                responses.push(response);
+            }
+            timings.accumulate(&chunk_timings);
         }
         (responses, timings)
     }
