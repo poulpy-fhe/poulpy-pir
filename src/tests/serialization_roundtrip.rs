@@ -9,7 +9,7 @@ use poulpy_cpu_avx::FFT64Avx;
 
 use crate::{
     client::Client,
-    config::{Collapse, Config, DefaultPirParameters32B, DEFAULT_BASE2K, DEFAULT_K, DEFAULT_N},
+    config::{Collapse, Config, DEFAULT_BASE2K, DEFAULT_K, DEFAULT_N, DefaultPirParameters32B},
     database::DatabaseLayout,
     payload::{Payload, U256P65535, U256P65536},
     serialization::{query_component_sizes, response_component_sizes},
@@ -219,6 +219,86 @@ fn roundtrip_response<P: crate::payload::Payload<[u8; 32]>>(
     decoded
 }
 
+fn assert_query_size_matches_wire<P: crate::payload::Payload<[u8; 32]>>(
+    query: &Query<BE>,
+    params: &crate::parameters::Parameters<BE, [u8; 32], P>,
+    layout: DatabaseLayout<P>,
+) {
+    let module = params.module();
+    let mut bytes = Vec::new();
+    query.write_to(module, &mut bytes).expect("query write_to");
+    let size = params.query_size(layout);
+    assert_eq!(size.total_size(), bytes.len(), "query total size");
+
+    let components = query_component_sizes(query, module);
+    match query {
+        Query::Interpolation(_) => {
+            assert_eq!(size.one_hot, components[0].1, "interpolation one-hot");
+            assert_eq!(size.key_g, components[1].1, "interpolation key_g");
+            assert_eq!(size.key_h, components[2].1, "interpolation key_h");
+            assert_eq!(size.ggsw, components[3].1, "interpolation ggsw");
+        }
+        Query::Recursion(_) => {
+            assert_eq!(size.src0_one_hot, components[0].1, "recursion src0");
+            assert_eq!(size.src1_one_hot, components[1].1, "recursion src1");
+            assert_eq!(size.key_gamma0, components[2].1, "recursion gamma0 key");
+            assert_eq!(size.key_gamma1, components[3].1, "recursion gamma1 key");
+            assert_eq!(size.key_gamma2, components[4].1, "recursion gamma2 key");
+        }
+    }
+}
+
+fn assert_response_size_matches_wire<P: crate::payload::Payload<[u8; 32]>>(
+    response: &crate::client::Response<BE>,
+    params: &crate::parameters::Parameters<BE, [u8; 32], P>,
+    layout: DatabaseLayout<P>,
+) {
+    let module = params.module();
+    let mut bytes = Vec::new();
+    response
+        .write_to(module, &mut bytes)
+        .expect("response write_to");
+    let size = params.response_size(layout);
+    assert_eq!(size.total_size(), bytes.len(), "response total size");
+
+    let components = response_component_sizes(response, module);
+    match response {
+        crate::client::Response::Interpolation(_) => {
+            assert_eq!(size.selected, components[0].1, "interpolation selected");
+        }
+        crate::client::Response::Recursion(_) => {
+            assert_eq!(size.resp1, components[0].1, "recursion resp1");
+            assert_eq!(size.resp2, components[1].1, "recursion resp2");
+        }
+    }
+}
+
+#[test]
+fn size_helpers_match_wire_interpolation() {
+    let config = Config::<[u8; 32], U256P65535> {
+        n: 64,
+        base2k: DEFAULT_BASE2K,
+        k: DEFAULT_K,
+        collapse: Collapse::Interpolation,
+        _phantom: PhantomData,
+    };
+    let n = config.n();
+    let layout = DatabaseLayout::<U256P65535>::new(2 * n, 2 * n);
+    let item = layout.num_payloads(n) - 1;
+    let payload = [3u8; 32];
+
+    let mut server = Server::<BE, U256P65535>::new(config, layout);
+    server.update_shard(item, &[payload]);
+    server.offline();
+
+    let mut client = Client::<BE, U256P65535>::new(config, layout);
+    let (query, _) = client.query(item);
+    assert_query_size_matches_wire(&query, client.params(), layout);
+
+    let response = server.respond(&query);
+    assert_response_size_matches_wire(&response, server.params(), layout);
+}
+
 /// Interpolation collapse, full `n = 2048` FHE: run with `--release`.
 #[test]
 fn serialization_roundtrip_interpolation() {
@@ -250,10 +330,12 @@ fn serialization_roundtrip_interpolation() {
 
     let mut client = Client::<BE, U256P65535>::new(config, layout);
     let (query, state) = client.query(item);
+    assert_query_size_matches_wire(&query, client.params(), layout);
 
     // Query travels client → server over the wire.
     let query = roundtrip_query(&query, server.params(), "interpolation");
     let response = server.respond(&query);
+    assert_response_size_matches_wire(&response, server.params(), layout);
     // Response travels server → client over the wire.
     let response = roundtrip_response(&response, client.params(), "interpolation");
 
@@ -292,9 +374,11 @@ fn serialization_roundtrip_recursion() {
 
     let mut client = Client::<BE, U256P65536>::new(config, layout);
     let (query, state) = client.query(item);
+    assert_query_size_matches_wire(&query, client.params(), layout);
 
     let query = roundtrip_query(&query, server.params(), "recursion");
     let response = server.respond(&query);
+    assert_response_size_matches_wire(&response, server.params(), layout);
     let response = roundtrip_response(&response, client.params(), "recursion");
 
     let got = client.decode(&response, &state);

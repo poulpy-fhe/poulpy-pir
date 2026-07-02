@@ -9,20 +9,18 @@ use poulpy_hal::{
         ModuleN, ScratchArenaTakeBasic, VecZnxAddAssignBackend, VecZnxRotateBackend,
         VecZnxSubBackend,
     },
-    layouts::{Backend, ScratchArena, VecZnx, VecZnxToBackendMut, VecZnxToBackendRef, ZnxInfos},
+    layouts::{
+        Backend, Module, ScratchArena, VecZnx, VecZnxToBackendMut, VecZnxToBackendRef, ZnxInfos,
+    },
 };
 
-#[macro_export]
-macro_rules! impl_monomial_interpolation_default {
-    ($be:ty) => {
-        impl $crate::interpolation::default::MonomialInterpolationDefault<$be>
-            for ::poulpy_hal::layouts::Module<$be>
-        {
-        }
-    };
-}
-pub use crate::impl_monomial_interpolation_default;
 use crate::interpolation::HornerHelper;
+
+/// Blanket impl: every backend's `Module` gets the default monomial
+/// interpolation. The trait is local to this crate, so this is allowed by the
+/// orphan rules and keeps the interpolation layer fully backend-agnostic (no
+/// concrete backend is named anywhere in the library).
+impl<BE: Backend> MonomialInterpolationDefault<BE> for Module<BE> {}
 
 pub trait MonomialInterpolationDefault<BE: Backend>
 where
@@ -181,16 +179,13 @@ fn bit_reverse(mut x: usize, bits: usize) -> usize {
     r
 }
 
-#[macro_export]
-macro_rules! impl_horner_evaluation_default {
-    ($be:ty) => {
-        impl $crate::interpolation::default::HornerEvaluationDefault<$be>
-            for ::poulpy_hal::layouts::Module<$be>
-        {
-        }
-    };
+/// Blanket impl: every backend's `Module` whose ops satisfy the Horner
+/// supertraits gets the default Horner evaluation. Local trait ⇒ orphan-rule
+/// safe, and no concrete backend is named.
+impl<BE: Backend> HornerEvaluationDefault<BE> for Module<BE> where
+    Module<BE>: GLWEExternalProduct<BE> + GLWECopy<BE> + GLWEAdd<BE>
+{
 }
-pub use crate::impl_horner_evaluation_default;
 
 pub trait HornerEvaluationDefault<BE: Backend>
 where

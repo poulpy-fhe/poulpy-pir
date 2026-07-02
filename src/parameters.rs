@@ -1,3 +1,5 @@
+use std::mem::size_of;
+
 use poulpy_core::{
     EncryptionLayout,
     layouts::{
@@ -9,10 +11,89 @@ use poulpy_hal::layouts::{Backend, Module};
 
 use crate::{
     config::{Collapse, Config},
+    database::DatabaseLayout,
     encoding::ModPEncoder,
     packing::PackingPrecomputeInfos,
     payload::Payload,
 };
+
+/// Densest signed-`i64` limb packing used by query/response serialization.
+const TRANSMIT_BASE2K: usize = 63;
+const U8_BYTES: usize = 1;
+const U32_BYTES: usize = 4;
+const U64_BYTES: usize = 8;
+const SEED_BYTES: usize = 32;
+const I64_BYTES: usize = size_of::<i64>();
+
+/// Actual serialized byte size of a PIR query, split by transmitted component.
+///
+/// Coefficients are counted as serialized today: one `i64` per transmitted limb
+/// after base2k=63 repacking, plus the framing bytes written by the serializers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QuerySize {
+    /// Collapse tag byte.
+    pub tag: usize,
+    /// `Vec<_>` length prefixes (`u64` each).
+    pub length_prefixes: usize,
+    /// Interpolation one-hot blocks.
+    pub one_hot: usize,
+    /// InsPIRe² first one-hot source (`src0`).
+    pub src0_one_hot: usize,
+    /// InsPIRe² second one-hot source (`src1`).
+    pub src1_one_hot: usize,
+    /// Interpolation key `g`.
+    pub key_g: usize,
+    /// Interpolation key `h`.
+    pub key_h: usize,
+    /// Interpolation root GGSW.
+    pub ggsw: usize,
+    /// InsPIRe² `gamma0` key.
+    pub key_gamma0: usize,
+    /// InsPIRe² `gamma1` key.
+    pub key_gamma1: usize,
+    /// InsPIRe² `gamma2` key.
+    pub key_gamma2: usize,
+}
+
+impl QuerySize {
+    /// Total serialized query size in bytes.
+    pub fn total_size(&self) -> usize {
+        self.tag
+            + self.length_prefixes
+            + self.one_hot
+            + self.src0_one_hot
+            + self.src1_one_hot
+            + self.key_g
+            + self.key_h
+            + self.ggsw
+            + self.key_gamma0
+            + self.key_gamma1
+            + self.key_gamma2
+    }
+}
+
+/// Actual serialized byte size of a PIR response, split by transmitted
+/// component.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResponseSize {
+    /// Collapse tag byte.
+    pub tag: usize,
+    /// `Vec<_>` length prefixes (`u64` each).
+    pub length_prefixes: usize,
+    /// Interpolation selected GLWE.
+    pub selected: usize,
+    /// InsPIRe² first response vector.
+    pub resp1: usize,
+    /// InsPIRe² second response vector.
+    pub resp2: usize,
+}
+
+impl ResponseSize {
+    /// Total serialized response size in bytes.
+    pub fn total_size(&self) -> usize {
+        self.tag + self.length_prefixes + self.selected + self.resp1 + self.resp2
+    }
+}
 
 /// All toy-PIR parameters plus the backend [`Module`] they instantiate. Pass it
 /// by reference everywhere; it is the single source of truth for dimensions and
@@ -184,4 +265,119 @@ where
             self.baby_size(),
         )
     }
+
+    /// Actual serialized query size for `layout`, counted in bytes.
+    pub fn query_size(&self, layout: DatabaseLayout<P>) -> QuerySize
+    where
+        P: Payload<[u8; 32]>,
+    {
+        match self.collapse() {
+            Collapse::Interpolation => {
+                let one_hot_blocks = layout.column_blocks(self.n());
+                QuerySize {
+                    tag: U8_BYTES,
+                    length_prefixes: U64_BYTES,
+                    one_hot: one_hot_blocks * glwe_compressed_wire_bytes(self.n(), self.k()),
+                    key_g: self.auto_key_wire_bytes(),
+                    key_h: self.auto_key_wire_bytes(),
+                    ggsw: self.ggsw_wire_bytes(),
+                    ..QuerySize::default()
+                }
+            }
+            Collapse::Recursion {
+                gamma0,
+                gamma1: _,
+                gamma2: _,
+            } => {
+                let t = layout.grid_rows_for(gamma0);
+                QuerySize {
+                    tag: U8_BYTES,
+                    length_prefixes: 2 * U64_BYTES,
+                    src0_one_hot: layout.column_blocks(self.n())
+                        * glwe_compressed_wire_bytes(self.n(), self.k()),
+                    src1_one_hot: t.div_ceil(self.n())
+                        * glwe_compressed_wire_bytes(self.n(), self.k()),
+                    key_gamma0: self.compressed_key_wire_bytes(),
+                    key_gamma1: self.compressed_key_wire_bytes(),
+                    key_gamma2: self.compressed_key_wire_bytes(),
+                    ..QuerySize::default()
+                }
+            }
+        }
+    }
+
+    /// Actual serialized response size for `layout`, counted in bytes.
+    pub fn response_size(&self, layout: DatabaseLayout<P>) -> ResponseSize
+    where
+        P: Payload<[u8; 32]>,
+    {
+        match self.collapse() {
+            Collapse::Interpolation => ResponseSize {
+                tag: U8_BYTES,
+                selected: glwe_wire_bytes(self.n(), self.k()),
+                ..ResponseSize::default()
+            },
+            Collapse::Recursion {
+                gamma0,
+                gamma1,
+                gamma2,
+            } => {
+                layout.grid_rows_for(gamma0);
+                let tau = qtilde_bits(self).div_ceil(self.matmul_base2k());
+                let qtilde_bits = qtilde_bits(self);
+                ResponseSize {
+                    tag: U8_BYTES,
+                    length_prefixes: 2 * U64_BYTES,
+                    resp1: (self.n() * tau).div_ceil(gamma1)
+                        * glwe_wire_bytes(self.n(), qtilde_bits),
+                    resp2: (gamma0 * tau).div_ceil(gamma2) * glwe_wire_bytes(self.n(), qtilde_bits),
+                    ..ResponseSize::default()
+                }
+            }
+        }
+    }
+
+    fn auto_key_wire_bytes(&self) -> usize {
+        let entries = self.dnum();
+        U64_BYTES
+            + U64_BYTES
+            + entries * SEED_BYTES
+            + entries * rank0_glwe_wire_bytes(self.n(), self.k())
+    }
+
+    fn compressed_key_wire_bytes(&self) -> usize {
+        U64_BYTES + self.auto_key_wire_bytes()
+    }
+
+    fn ggsw_wire_bytes(&self) -> usize {
+        let entries = self.dnum() * 2;
+        U64_BYTES + entries * SEED_BYTES + entries * rank0_glwe_wire_bytes(self.n(), self.k())
+    }
+}
+
+fn qtilde_bits<BE: Backend, B, P>(params: &Parameters<BE, B, P>) -> usize
+where
+    P: Payload<B>,
+{
+    2 * params.matmul_base2k()
+}
+
+fn transmitted_limbs(k: usize) -> usize {
+    k.div_ceil(TRANSMIT_BASE2K)
+}
+
+fn vec_znx_wire_bytes(n: usize, cols: usize, size: usize) -> usize {
+    5 * U64_BYTES + n * cols * size * I64_BYTES
+}
+
+fn glwe_wire_bytes(n: usize, k: usize) -> usize {
+    U32_BYTES + vec_znx_wire_bytes(n, 2, transmitted_limbs(k))
+}
+
+fn glwe_compressed_wire_bytes(n: usize, k: usize) -> usize {
+    U32_BYTES + U32_BYTES + SEED_BYTES + vec_znx_wire_bytes(n, 1, transmitted_limbs(k))
+}
+
+fn rank0_glwe_wire_bytes(n: usize, k: usize) -> usize {
+    U32_BYTES + vec_znx_wire_bytes(n, 1, transmitted_limbs(k))
 }

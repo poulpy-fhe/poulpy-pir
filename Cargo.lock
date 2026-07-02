@@ -340,6 +340,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "poulpy-cpu-avx512"
+version = "0.6.0"
+source = "git+https://github.com/poulpy-fhe/poulpy?rev=f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed#f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed"
+dependencies = [
+ "bytemuck",
+ "byteorder",
+ "itertools",
+ "once_cell",
+ "paste",
+ "poulpy-core",
+ "poulpy-cpu-ref",
+ "poulpy-hal",
+ "rand",
+ "rand_chacha",
+ "rand_core",
+ "rand_distr",
+]
+
+[[package]]
 name = "poulpy-cpu-ref"
 version = "0.6.0"
 source = "git+https://github.com/poulpy-fhe/poulpy?rev=f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed#f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed"
@@ -385,6 +404,7 @@ dependencies = [
  "getrandom",
  "poulpy-core",
  "poulpy-cpu-avx",
+ "poulpy-cpu-avx512",
  "poulpy-cpu-ref",
  "poulpy-hal",
  "private-gemm-x86",

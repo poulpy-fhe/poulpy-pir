@@ -4,7 +4,7 @@ use poulpy_cpu_avx::FFT64Avx;
 
 use crate::{
     client::{Client, Response},
-    config::{Collapse, Config, DefaultPirParameters32B, DEFAULT_BASE2K, DEFAULT_K, DEFAULT_N},
+    config::{Collapse, Config, DEFAULT_BASE2K, DEFAULT_K, DEFAULT_N, DefaultPirParameters32B},
     database::DatabaseLayout,
     payload::{U256P65535, U256P65536},
     server::Server,

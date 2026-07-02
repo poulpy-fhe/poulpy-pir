@@ -2,17 +2,17 @@
 
 use crate::config::{Collapse, Config, DEFAULT_BASE2K, DEFAULT_K};
 use crate::packing::{
-    recursion::{decompose_digits, partial_pack_batch, qtilde_glwe_layout},
     Packing, PackingKeysGenerate, PackingMaskAggregation,
+    recursion::{decompose_digits, partial_pack_batch, qtilde_glwe_layout},
 };
 use poulpy_core::{
+    EncryptionLayout, GLWECompressedEncryptSk, GLWEDecrypt, GLWEExpandLWEMatrix, GLWENormalize,
+    LWEMatrixDecrypt,
     layouts::{
         Base2K, Degree, GLWEAutomorphismKeyLayout, GLWEDecompress, GLWELayout,
         GLWESecretPreparedFactory, LWEInfos, LWEMatrixLayout, LWESecret, ModuleCoreAlloc,
         ModuleCoreCompressedAlloc, Rank, SecretConversion, TorusPrecision,
     },
-    EncryptionLayout, GLWECompressedEncryptSk, GLWEDecrypt, GLWEExpandLWEMatrix, GLWENormalize,
-    LWEMatrixDecrypt,
 };
 use poulpy_cpu_avx::FFT64Avx;
 
