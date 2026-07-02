@@ -16,7 +16,7 @@ use std::time::Instant;
 use poulpy_cpu_avx::FFT64Avx;
 use poulpy_pir::{
     client::{Client, Response},
-    config::{Collapse, Config, DefaultPirConfig32B, DefaultPirParameters32B},
+    config::{Collapse, Config, DefaultPirConfig32B, DefaultPirParameters32B, DefaultScheme},
     database::DatabaseLayout,
     payload::Payload,
     server::Server,
@@ -24,7 +24,7 @@ use poulpy_pir::{
 
 /// Backend used by this driver.
 type BE = FFT64Avx;
-const DEFAULT: DefaultPirParameters32B = DefaultPirParameters32B::InspireRecGamma32_32GiB;
+const DEFAULT: DefaultPirParameters32B = DefaultPirParameters32B::canonical(DefaultScheme::Recursion { gamma0: 32 }, 32);
 
 fn main() {
     const ITEM_INDEX: usize = 1_000_000;

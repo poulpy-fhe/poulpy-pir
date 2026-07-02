@@ -17,7 +17,7 @@ use poulpy_hal::{
 };
 
 use crate::{
-    config::{Collapse, Config, DefaultPirParameters32B},
+    config::{Collapse, Config, DefaultPirParameters32B, DefaultScheme},
     database::{DatabaseLayout, PayloadAddress},
     interpolation::{Interpolation, InterpolationKeys},
     packing::PackingKeysGenerate,
@@ -64,9 +64,9 @@ where
     ScratchOwned<BE>: ScratchOwnedAlloc<BE>,
 {
     fn default() -> Self {
-        let config = DefaultPirParameters32B::InspireInt1GiB
+        let config = DefaultPirParameters32B::canonical(DefaultScheme::Interpolation, 1)
             .interpolation()
-            .expect("InspireInt1GiB must resolve to interpolation params")
+            .expect("canonical InsPIRe 1 GiB must resolve to interpolation params")
             .config;
         let params = config.new::<BE>();
         let layout = DatabaseLayout::<P65535<[u8; 32]>>::new(params.n(), params.n());

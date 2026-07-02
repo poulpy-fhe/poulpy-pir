@@ -4,7 +4,7 @@ use poulpy_cpu_avx::FFT64Avx;
 
 use crate::{
     client::{Client, Response},
-    config::{Collapse, Config, DEFAULT_BASE2K, DEFAULT_K, DEFAULT_N, DefaultPirParameters32B},
+    config::{Collapse, Config, DEFAULT_BASE2K, DEFAULT_K, DEFAULT_N, DefaultPirParameters32B, DefaultScheme},
     database::DatabaseLayout,
     payload::{U256P65535, U256P65536},
     server::Server,
@@ -58,7 +58,7 @@ fn server_client_roundtrip_interpolation_generic_u256_chunked() {
 
 #[test]
 fn server_client_roundtrip_full_u256() {
-    let config = DefaultPirParameters32B::InspireInt1GiB
+    let config = DefaultPirParameters32B::canonical(DefaultScheme::Interpolation, 1)
         .interpolation()
         .expect("InspireInt1GiB must resolve to interpolation params")
         .config;

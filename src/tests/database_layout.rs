@@ -1,5 +1,5 @@
 use crate::{
-    config::{Collapse, DefaultPirConfig32B, DefaultPirParameters32B},
+    config::{Collapse, DefaultPirConfig32B, DefaultPirParameters32B, DefaultScheme},
     database::DatabaseLayout,
     payload::{Payload, U256P65535},
 };
@@ -98,9 +98,9 @@ fn accepts_second_dimension_exactly_2n() {
 /// `payloads_per_column`, so total payloads and bytes are unchanged).
 #[test]
 fn recursion_default_matches_paper_32_byte_payloads() {
-    let default = DefaultPirParameters32B::InspireRecGamma32_1GiB
+    let default = DefaultPirParameters32B::canonical(DefaultScheme::Recursion { gamma0: 32 }, 1)
         .recursion()
-        .expect("InspireRecGamma32_1GiB must resolve to recursion params");
+        .expect("canonical InsPIRe² γ0=32 1 GiB must resolve to recursion params");
     let params = default.config.new::<BE>();
     let layout = default.layout;
     assert_eq!(
@@ -121,300 +121,109 @@ fn recursion_default_matches_paper_32_byte_payloads() {
 }
 
 #[test]
-fn default_32b_parameter_enum_matches_table_shapes() {
-    let expected = [
-        (
-            DefaultPirParameters32B::InspireInt1GiB,
-            Collapse::Interpolation,
-            1,
-            8192,
-            140,
-        ),
-        (
-            DefaultPirParameters32B::InspireInt2GiB,
-            Collapse::Interpolation,
-            2,
-            16384,
-            196,
-        ),
-        (
-            DefaultPirParameters32B::InspireInt4GiB,
-            Collapse::Interpolation,
-            4,
-            32768,
-            308,
-        ),
-        (
-            DefaultPirParameters32B::InspireInt8GiB,
-            Collapse::Interpolation,
-            8,
-            65536,
-            532,
-        ),
-        (
-            DefaultPirParameters32B::InspireInt16GiB,
-            Collapse::Interpolation,
-            16,
-            131072,
-            980,
-        ),
-        (
-            DefaultPirParameters32B::InspireInt32GiB,
-            Collapse::Interpolation,
-            32,
-            262144,
-            1876,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma16_1GiB,
-            Collapse::Recursion {
-                gamma0: 16,
-                gamma1: 1024,
-                gamma2: 16,
-            },
-            1,
-            8192,
-            80,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma16_2GiB,
-            Collapse::Recursion {
-                gamma0: 16,
-                gamma1: 1024,
-                gamma2: 16,
-            },
-            2,
-            16384,
-            132,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma16_4GiB,
-            Collapse::Recursion {
-                gamma0: 16,
-                gamma1: 1024,
-                gamma2: 16,
-            },
-            4,
-            32768,
-            238,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma16_8GiB,
-            Collapse::Recursion {
-                gamma0: 16,
-                gamma1: 1024,
-                gamma2: 16,
-            },
-            8,
-            65536,
-            450,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma16_16GiB,
-            Collapse::Recursion {
-                gamma0: 16,
-                gamma1: 1024,
-                gamma2: 16,
-            },
-            16,
-            131072,
-            874,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma16_32GiB,
-            Collapse::Recursion {
-                gamma0: 16,
-                gamma1: 1024,
-                gamma2: 16,
-            },
-            32,
-            262144,
-            1722,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma32_1GiB,
-            Collapse::Recursion {
-                gamma0: 32,
-                gamma1: 1024,
-                gamma2: 32,
-            },
-            1,
-            8192,
-            66,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma32_2GiB,
-            Collapse::Recursion {
-                gamma0: 32,
-                gamma1: 1024,
-                gamma2: 32,
-            },
-            2,
-            16384,
-            119,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma32_4GiB,
-            Collapse::Recursion {
-                gamma0: 32,
-                gamma1: 1024,
-                gamma2: 32,
-            },
-            4,
-            32768,
-            225,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma32_8GiB,
-            Collapse::Recursion {
-                gamma0: 32,
-                gamma1: 1024,
-                gamma2: 32,
-            },
-            8,
-            65536,
-            437,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma32_16GiB,
-            Collapse::Recursion {
-                gamma0: 32,
-                gamma1: 1024,
-                gamma2: 32,
-            },
-            16,
-            131072,
-            861,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma32_32GiB,
-            Collapse::Recursion {
-                gamma0: 32,
-                gamma1: 1024,
-                gamma2: 32,
-            },
-            32,
-            262144,
-            1709,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma64_1GiB,
-            Collapse::Recursion {
-                gamma0: 64,
-                gamma1: 1024,
-                gamma2: 64,
-            },
-            1,
-            8192,
-            60,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma64_2GiB,
-            Collapse::Recursion {
-                gamma0: 64,
-                gamma1: 1024,
-                gamma2: 64,
-            },
-            2,
-            16384,
-            113,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma64_4GiB,
-            Collapse::Recursion {
-                gamma0: 64,
-                gamma1: 1024,
-                gamma2: 64,
-            },
-            4,
-            32768,
-            219,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma64_8GiB,
-            Collapse::Recursion {
-                gamma0: 64,
-                gamma1: 1024,
-                gamma2: 64,
-            },
-            8,
-            65536,
-            431,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma64_16GiB,
-            Collapse::Recursion {
-                gamma0: 64,
-                gamma1: 1024,
-                gamma2: 64,
-            },
-            16,
-            131072,
-            855,
-        ),
-        (
-            DefaultPirParameters32B::InspireRecGamma64_32GiB,
-            Collapse::Recursion {
-                gamma0: 64,
-                gamma1: 1024,
-                gamma2: 64,
-            },
-            32,
-            262144,
-            1703,
-        ),
-    ];
+fn default_32b_grid_is_valid_and_covers_table2() {
+    let all = DefaultPirParameters32B::all();
 
-    assert_eq!(DefaultPirParameters32B::ALL, expected.map(|(p, ..)| p));
+    // 27 layout shapes (see cols_window sums) × 4 schemes.
+    assert_eq!(all.len(), 108, "grid size");
 
-    for (params, collapse, gib, cols, query_kib) in expected {
-        assert_eq!(params.db_size_gib(), gib);
-        assert_eq!(params.rows(), 1 << 16);
-        assert_eq!(params.cols(), cols);
-        assert_eq!(params.collapse(), collapse);
-        assert_eq!(params.query_kib(), query_kib);
+    // Names are unique and round-trip through from_name.
+    let mut names = std::collections::BTreeSet::new();
+    for &p in &all {
+        assert!(names.insert(p.name()), "duplicate name {}", p.name());
+        assert_eq!(DefaultPirParameters32B::from_name(&p.name()), Some(p));
+    }
 
-        match params.resolve() {
-            DefaultPirConfig32B::Interpolation(resolved) => {
-                assert_eq!(collapse, Collapse::Interpolation);
-                assert_eq!(resolved.db_size_gib, gib);
-                assert_eq!(params.gamma0(), None);
-                assert_eq!(params.gamma1(), None);
-                assert_eq!(params.gamma2(), None);
-                let config = resolved.config;
-                let layout = resolved.layout;
-                assert_eq!(config.collapse(), collapse);
-                assert_eq!(layout.rows(), params.rows());
-                assert_eq!(layout.cols(), cols);
-                assert_eq!(layout.interpolation_t(config.n()), 32);
-                assert!(params.interpolation().is_some());
-                assert!(params.recursion().is_none());
+    for &p in &all {
+        // Exact DB fill: rows·cols == 2^29·db_gib, both powers of two.
+        assert_eq!(p.rows() * p.cols(), p.total_u16(), "{}", p.name());
+        assert!(p.cols().is_power_of_two() && p.rows().is_power_of_two());
+
+        // cols lies in the size's window.
+        let (lo, hi) = DefaultPirParameters32B::cols_window(p.db_gib);
+        let c = p.cols().trailing_zeros();
+        assert!((lo..=hi).contains(&c), "{}: cols 2^{c} out of window", p.name());
+
+        // Backend-free size accessors resolve and return nonzero sizes.
+        assert!(p.query_bytes() > 0 && p.response_bytes() > 0, "{}", p.name());
+
+        // Resolves, and the layout math holds (asserts fire inside on bad shapes).
+        match p.resolve() {
+            DefaultPirConfig32B::Interpolation(r) => {
+                assert!(matches!(p.scheme, DefaultScheme::Interpolation));
+                assert_eq!(p.gamma0(), None);
+                assert_eq!(r.db_size_gib, p.db_gib);
+                assert_eq!(r.layout.rows(), p.rows());
+                assert_eq!(r.layout.cols(), p.cols());
+                // interpolation_t <= 2n is asserted inside interpolation_t.
+                let _ = r.layout.interpolation_t(r.config.n());
+                assert!(r.layout.num_payloads(r.config.n()) > 0);
+                assert!(p.interpolation().is_some() && p.recursion().is_none());
             }
-            DefaultPirConfig32B::Recursion(resolved) => {
-                let Collapse::Recursion {
-                    gamma0,
-                    gamma1,
-                    gamma2,
-                } = collapse
-                else {
-                    panic!("expected recursion collapse");
+            DefaultPirConfig32B::Recursion(r) => {
+                let DefaultScheme::Recursion { gamma0 } = p.scheme else {
+                    panic!("recursion resolve for non-recursion scheme")
                 };
-                assert_eq!(resolved.db_size_gib, gib);
-                assert_eq!(resolved.gamma0, gamma0);
-                assert_eq!(resolved.gamma1, gamma1);
-                assert_eq!(resolved.gamma2, gamma2);
-                assert_eq!(params.gamma0(), Some(gamma0));
-                assert_eq!(params.gamma1(), Some(gamma1));
-                assert_eq!(params.gamma2(), Some(gamma2));
-                let config = resolved.config;
-                let layout = resolved.layout;
-                assert_eq!(config.collapse(), collapse);
-                assert_eq!(layout.rows(), params.rows());
-                assert_eq!(layout.cols(), cols);
-                assert_eq!(layout.grid_rows_for(gamma0), params.rows() / gamma0);
-                assert!(params.interpolation().is_none());
-                assert!(params.recursion().is_some());
+                assert_eq!(p.gamma0(), Some(gamma0));
+                assert_eq!(p.gamma1(), Some(1024));
+                assert_eq!(p.gamma2(), Some(gamma0));
+                assert_eq!(r.gamma0, gamma0);
+                assert_eq!(r.gamma1, 1024);
+                assert_eq!(r.gamma2, gamma0);
+                assert_eq!(r.layout.rows(), p.rows());
+                assert_eq!(r.layout.cols(), p.cols());
+                assert_eq!(r.layout.grid_rows_for(gamma0), p.rows() / gamma0);
+                assert!(r.layout.num_payloads(gamma0) > 0);
+                assert!(p.recursion().is_some() && p.interpolation().is_none());
             }
+        }
+    }
+
+    // Every paper Table 2 (scheme, db_gib, cols) point is present (rows derived).
+    let table2: &[(DefaultScheme, usize, usize)] = &[
+        // InsPIRe
+        (DefaultScheme::Interpolation, 1, 8192),
+        (DefaultScheme::Interpolation, 1, 16384),
+        (DefaultScheme::Interpolation, 1, 32768),
+        (DefaultScheme::Interpolation, 8, 65536),
+        (DefaultScheme::Interpolation, 8, 131072),
+        (DefaultScheme::Interpolation, 32, 131072),
+        (DefaultScheme::Interpolation, 32, 262144),
+        // InsPIRe² γ0=64
+        (DefaultScheme::Recursion { gamma0: 64 }, 1, 4096),
+        (DefaultScheme::Recursion { gamma0: 64 }, 1, 8192),
+        (DefaultScheme::Recursion { gamma0: 64 }, 1, 16384),
+        (DefaultScheme::Recursion { gamma0: 64 }, 1, 32768),
+        (DefaultScheme::Recursion { gamma0: 64 }, 8, 8192),
+        (DefaultScheme::Recursion { gamma0: 64 }, 8, 16384),
+        (DefaultScheme::Recursion { gamma0: 64 }, 8, 32768),
+        (DefaultScheme::Recursion { gamma0: 64 }, 8, 65536),
+        (DefaultScheme::Recursion { gamma0: 64 }, 32, 32768),
+        (DefaultScheme::Recursion { gamma0: 64 }, 32, 65536),
+        (DefaultScheme::Recursion { gamma0: 64 }, 32, 131072),
+        // InsPIRe² γ0=32
+        (DefaultScheme::Recursion { gamma0: 32 }, 1, 16384),
+        (DefaultScheme::Recursion { gamma0: 32 }, 1, 32768),
+        (DefaultScheme::Recursion { gamma0: 32 }, 8, 131072),
+        (DefaultScheme::Recursion { gamma0: 32 }, 32, 65536),
+        (DefaultScheme::Recursion { gamma0: 32 }, 32, 131072),
+        (DefaultScheme::Recursion { gamma0: 32 }, 32, 262144),
+    ];
+    for &(scheme, db_gib, cols) in table2 {
+        let want = DefaultPirParameters32B {
+            scheme,
+            db_gib,
+            cols,
+        };
+        assert!(all.contains(&want), "missing Table-2 point {}", want.name());
+    }
+
+    // Canonical points (rows = 2^16) exist for every scheme/size.
+    for scheme in DefaultPirParameters32B::SCHEMES {
+        for db in DefaultPirParameters32B::DB_SIZES_GIB {
+            let canon = DefaultPirParameters32B::canonical(scheme, db);
+            assert_eq!(canon.rows(), 1 << 16, "canonical rows for {}", canon.name());
+            assert!(all.contains(&canon), "canonical {} missing", canon.name());
         }
     }
 }

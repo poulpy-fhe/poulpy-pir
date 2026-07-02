@@ -149,43 +149,47 @@ where
         P::decode(value, digits)
     }
 
+    // The cryptosystem scalars below are pure functions of the [`Config`] (no
+    // backend), so they live on `Config` and are forwarded here for the 50+
+    // call sites that already hold a `Parameters`.
+
     /// Pack / repacking-key regime base2k (3x18).
     pub const fn base2k(&self) -> usize {
-        self.params.base2k
+        self.params.base2k()
     }
 
     /// Linear-matmul input regime base2k (4x16).
     pub const fn matmul_base2k(&self) -> usize {
-        16
+        self.params.matmul_base2k()
     }
 
     /// Query-mask regime base2k. Using 16 (matching the matmul regime) keeps the
     /// `U·A` inner-product element at i16 so the i64 accumulator stays clear of
     /// overflow even for many block-columns; 32 (i32 element) overflows at ~54.
     pub const fn mask_base2k(&self) -> usize {
-        32
+        self.params.mask_base2k()
     }
 
     /// Torus precision shared by every regime.
     pub const fn k(&self) -> usize {
-        self.params.k
+        self.params.k()
     }
 
     pub const fn dnum(&self) -> usize {
-        3
+        self.params.dnum()
     }
 
     pub const fn dsize(&self) -> usize {
-        1
+        self.params.dsize()
     }
 
     pub const fn baby_size(&self) -> usize {
-        8
+        self.params.baby_size()
     }
 
     /// Number of base2k limbs needed for `k` at the given base2k.
     pub const fn size_at(&self, base2k: usize) -> usize {
-        self.k().div_ceil(base2k)
+        self.params.size_at(base2k)
     }
 
     pub fn encoder(&self) -> ModPEncoder {
@@ -266,6 +270,71 @@ where
         )
     }
 
+    /// Actual serialized query size for `layout`, counted in bytes. Backend-free;
+    /// forwards to [`Config::query_size`].
+    pub fn query_size(&self, layout: DatabaseLayout<P>) -> QuerySize
+    where
+        P: Payload<[u8; 32]>,
+    {
+        self.params.query_size(layout)
+    }
+
+    /// Actual serialized response size for `layout`, counted in bytes.
+    /// Backend-free; forwards to [`Config::response_size`].
+    pub fn response_size(&self, layout: DatabaseLayout<P>) -> ResponseSize
+    where
+        P: Payload<[u8; 32]>,
+    {
+        self.params.response_size(layout)
+    }
+}
+
+/// Backend-free cryptosystem scalars and serialized-size computation. These are
+/// pure functions of the [`Config`] — no [`Module`] is needed — so they live
+/// here and [`Parameters`] forwards to them. This lets callers that only have a
+/// `Config` (e.g. [`crate::config::DefaultPirParameters32B`]) size a query /
+/// response without instantiating a backend.
+impl<B, P> Config<B, P>
+where
+    P: Payload<B>,
+{
+    /// Pack / repacking-key regime base2k (3x18).
+    pub const fn base2k(&self) -> usize {
+        self.base2k
+    }
+
+    /// Linear-matmul input regime base2k (4x16).
+    pub const fn matmul_base2k(&self) -> usize {
+        16
+    }
+
+    /// Query-mask regime base2k (2x32).
+    pub const fn mask_base2k(&self) -> usize {
+        32
+    }
+
+    /// Torus precision shared by every regime.
+    pub const fn k(&self) -> usize {
+        self.k
+    }
+
+    pub const fn dnum(&self) -> usize {
+        3
+    }
+
+    pub const fn dsize(&self) -> usize {
+        1
+    }
+
+    pub const fn baby_size(&self) -> usize {
+        8
+    }
+
+    /// Number of base2k limbs needed for `k` at the given base2k.
+    pub const fn size_at(&self, base2k: usize) -> usize {
+        self.k().div_ceil(base2k)
+    }
+
     /// Actual serialized query size for `layout`, counted in bytes.
     pub fn query_size(&self, layout: DatabaseLayout<P>) -> QuerySize
     where
@@ -306,8 +375,10 @@ where
         }
     }
 
-    /// Actual serialized response size for `layout`, counted in bytes.
-    pub fn response_size(&self, layout: DatabaseLayout<P>) -> ResponseSize
+    /// Actual serialized response size, counted in bytes. The size depends only
+    /// on the cryptosystem scalars and collapse (not the DB shape), so `_layout`
+    /// is unused; it is kept for signature symmetry with [`Self::query_size`].
+    pub fn response_size(&self, _layout: DatabaseLayout<P>) -> ResponseSize
     where
         P: Payload<[u8; 32]>,
     {
@@ -322,9 +393,8 @@ where
                 gamma1,
                 gamma2,
             } => {
-                layout.grid_rows_for(gamma0);
-                let tau = qtilde_bits(self).div_ceil(self.matmul_base2k());
-                let qtilde_bits = qtilde_bits(self);
+                let qtilde_bits = 2 * self.matmul_base2k();
+                let tau = qtilde_bits.div_ceil(self.matmul_base2k());
                 ResponseSize {
                     tag: U8_BYTES,
                     length_prefixes: 2 * U64_BYTES,
@@ -353,13 +423,6 @@ where
         let entries = self.dnum() * 2;
         U64_BYTES + entries * SEED_BYTES + entries * rank0_glwe_wire_bytes(self.n(), self.k())
     }
-}
-
-fn qtilde_bits<BE: Backend, B, P>(params: &Parameters<BE, B, P>) -> usize
-where
-    P: Payload<B>,
-{
-    2 * params.matmul_base2k()
 }
 
 fn transmitted_limbs(k: usize) -> usize {

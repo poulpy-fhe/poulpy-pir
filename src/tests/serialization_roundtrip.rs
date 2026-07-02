@@ -9,7 +9,7 @@ use poulpy_cpu_avx::FFT64Avx;
 
 use crate::{
     client::Client,
-    config::{Collapse, Config, DEFAULT_BASE2K, DEFAULT_K, DEFAULT_N, DefaultPirParameters32B},
+    config::{Collapse, Config, DEFAULT_BASE2K, DEFAULT_K, DEFAULT_N, DefaultPirParameters32B, DefaultScheme},
     database::DatabaseLayout,
     payload::{Payload, U256P65535, U256P65536},
     serialization::{query_component_sizes, response_component_sizes},
@@ -64,7 +64,7 @@ fn report_sizes<P: Payload<[u8; 32]>>(
 /// packing keys, since the paper amortizes them to setup. Run with `--nocapture`.
 #[test]
 fn measure_query_sizes_vs_table() {
-    let interp_config = DefaultPirParameters32B::InspireInt1GiB
+    let interp_config = DefaultPirParameters32B::canonical(DefaultScheme::Interpolation, 1)
         .interpolation()
         .expect("InspireInt1GiB must resolve to interpolation params")
         .config;
@@ -106,7 +106,7 @@ fn measure_query_sizes_vs_table() {
     }
 
     // InsPIRe2: compare to table gamma0=32 rows.
-    let rec_config = DefaultPirParameters32B::InspireRecGamma32_1GiB
+    let rec_config = DefaultPirParameters32B::canonical(DefaultScheme::Recursion { gamma0: 32 }, 1)
         .recursion()
         .expect("InspireRecGamma32_1GiB must resolve to recursion params")
         .config;
@@ -154,7 +154,7 @@ fn measure_query_sizes_vs_table() {
 /// Run with `--nocapture` to see the numbers.
 #[test]
 fn measure_serialized_sizes() {
-    let interp_config = DefaultPirParameters32B::InspireInt1GiB
+    let interp_config = DefaultPirParameters32B::canonical(DefaultScheme::Interpolation, 1)
         .interpolation()
         .expect("InspireInt1GiB must resolve to interpolation params")
         .config;
@@ -166,7 +166,7 @@ fn measure_serialized_sizes() {
         300_000,
     );
 
-    let rec_config = DefaultPirParameters32B::InspireRecGamma32_1GiB
+    let rec_config = DefaultPirParameters32B::canonical(DefaultScheme::Recursion { gamma0: 32 }, 1)
         .recursion()
         .expect("InspireRecGamma32_1GiB must resolve to recursion params")
         .config;

@@ -7,7 +7,7 @@ use poulpy_cpu_avx::FFT64Avx;
 
 use crate::{
     client::{Client, Response},
-    config::{Collapse, Config, DEFAULT_BASE2K, DEFAULT_K, DefaultPirParameters32B},
+    config::{Collapse, Config, DEFAULT_BASE2K, DEFAULT_K, DefaultPirParameters32B, DefaultScheme},
     database::DatabaseLayout,
     payload::{U256P65535, U256P65536},
     server::{Query, Server},
@@ -23,7 +23,7 @@ type Layout = DatabaseLayout<U256P65535>;
 // Full n=2048 FHE end-to-end: run with `--release`.
 #[test]
 fn batch_interpolation_matches_per_query() {
-    let config = DefaultPirParameters32B::InspireInt1GiB
+    let config = DefaultPirParameters32B::canonical(DefaultScheme::Interpolation, 1)
         .interpolation()
         .expect("InspireInt1GiB must resolve to interpolation params")
         .config;
@@ -89,7 +89,7 @@ fn batch_interpolation_matches_per_query() {
 /// delegates the GEMM to the memory-bound GEMV).
 #[test]
 fn batch_interpolation_single_element() {
-    let config = DefaultPirParameters32B::InspireInt1GiB
+    let config = DefaultPirParameters32B::canonical(DefaultScheme::Interpolation, 1)
         .interpolation()
         .expect("InspireInt1GiB must resolve to interpolation params")
         .config;
