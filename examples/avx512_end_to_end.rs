@@ -13,12 +13,13 @@
 //!   cargo run --release --features avx512-fhe --example avx512_end_to_end -- InsPIRe-1GiB-c8192
 //! ```
 //!
-//! Args: `<name> [item_index]`. `<name>` is a [`DefaultPirParameters32B`] name
-//! (default `InsPIRe-1GiB-c8192`); run with an unknown name to print the full
+//! Args: `<name> [item_index] [batch]`. `<name>` is a [`DefaultPirParameters32B`]
+//! name (default `InsPIRe-1GiB-c8192`); run with an unknown name to print the full
 //! list, or e.g. `InsPIRe-32GiB-c262144` / `InsPIRe2-g64-32GiB-c131072` for the
 //! large-DB run. `item_index` (default 1_000_000) is clamped to the DB's payload
-//! capacity. `poulpy-cpu-avx512` enforces AVX-512F at compile time, so this only
-//! *builds* on an AVX-512F host.
+//! capacity. `batch` (default 1) additionally answers that many queries at once
+//! via `respond_batch` and reports batched throughput. `poulpy-cpu-avx512`
+//! enforces AVX-512F at compile time, so this only *builds* on an AVX-512F host.
 
 use std::time::Instant;
 
@@ -51,6 +52,12 @@ fn main() {
         .cloned()
         .unwrap_or_else(|| "InsPIRe-1GiB-c8192".to_string());
     let item_index: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    // Optional batch size: answer this many queries at once via `respond_batch`.
+    let batch: usize = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+        .max(1);
 
     let variant = DefaultPirParameters32B::from_name(&name).unwrap_or_else(|| {
         eprintln!("unknown parameter '{name}'. Available parameters:");
@@ -88,8 +95,12 @@ fn main() {
     );
 
     match variant.resolve() {
-        DefaultPirConfig32B::Interpolation(params) => run(params.config, params.layout, item_index),
-        DefaultPirConfig32B::Recursion(params) => run(params.config, params.layout, item_index),
+        DefaultPirConfig32B::Interpolation(params) => {
+            run(params.config, params.layout, item_index, batch)
+        }
+        DefaultPirConfig32B::Recursion(params) => {
+            run(params.config, params.layout, item_index, batch)
+        }
     }
 }
 
@@ -104,7 +115,7 @@ fn format_bytes(bytes: f64) -> String {
     format!("{value:.3} {}", UNITS[unit])
 }
 
-fn run<P>(config: Config<[u8; 32], P>, layout: DatabaseLayout<P>, requested_item: usize)
+fn run<P>(config: Config<[u8; 32], P>, layout: DatabaseLayout<P>, requested_item: usize, batch: usize)
 where
     P: Payload<[u8; 32]>,
 {
@@ -201,6 +212,52 @@ where
         if got == want { "OK" } else { "MISMATCH" }
     );
     assert_eq!(got, want, "{collapse:?} failed to recover the payload");
+
+    // ---- BATCH: answer `batch` queries at once via `respond_batch`. For
+    // interpolation each DB panel is read once for the whole batch (one i16×f64
+    // GEMM), so the online cost amortizes; recursion falls back to sequential.
+    if batch > 1 {
+        println!("\n---- batch of {batch} queries ----");
+        // Spread the items across the DB so they land in different panels.
+        let stride = (capacity / batch).max(1);
+        let items: Vec<usize> = (0..batch)
+            .map(|k| (item_index + k * stride) % capacity)
+            .collect();
+
+        let t = Instant::now();
+        let mut queries = Vec::with_capacity(batch);
+        let mut states = Vec::with_capacity(batch);
+        for &item in &items {
+            let (q, st) = client.query(item);
+            queries.push(q);
+            states.push(st);
+        }
+        println!("QUERY (build {batch})            : {:?}", t.elapsed());
+
+        let t = Instant::now();
+        let responses = server.respond_batch(&queries);
+        let batch_dt = t.elapsed();
+
+        // Decode + verify every response against the plaintext DB.
+        let mut ok = 0usize;
+        for ((resp, st), &item) in responses.iter().zip(&states).zip(&items) {
+            if client.decode(resp, st) == server.get(item) {
+                ok += 1;
+            }
+        }
+
+        println!("ONLINE batch total           : {batch_dt:?}");
+        println!(
+            "  per query (avg)            : {:?}",
+            batch_dt / batch as u32
+        );
+        println!(
+            "  throughput                 : {:.1} queries/s",
+            batch as f64 / batch_dt.as_secs_f64()
+        );
+        println!("BATCH RESULT                 : {ok}/{batch} decoded OK");
+        assert_eq!(ok, batch, "{collapse:?} batch decode mismatch");
+    }
 }
 
 fn print_layout_summary<P>(
