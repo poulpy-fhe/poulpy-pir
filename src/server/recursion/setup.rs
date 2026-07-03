@@ -22,6 +22,7 @@ use crate::{
     config::Collapse,
     database::DatabaseLayout,
     packing::{Packing, PackingMaskAggregation, recursion::qtilde_glwe_layout},
+    parallel::{assign_panels, num_threads, scoped_workers},
     parameters::Parameters,
     payload::Payload,
     server::{
@@ -197,23 +198,41 @@ where
         let src_infos = &self.recursion_state().src_infos;
         let dst_infos = mask_regime_infos(&self.params);
         let glwe_mask = self.params.glwe_mask();
-        (0..rows.div_ceil(n))
-            .map(|block| {
-                let mut q = module.lwe_matrix_alloc_from_infos(&dst_infos);
-                let mut sc = ScratchOwned::<BE>::alloc(default_query_mask_tmp_bytes(
-                    module, &dst_infos, &glwe_mask,
-                ));
-                fill_default_query_mask(
-                    module,
-                    &mut q,
-                    block_seed(crs_seed, block),
-                    src_infos,
-                    &glwe_mask,
-                    &mut sc.borrow(),
-                );
-                QueryMask::new(q, self.params.k())
-            })
-            .collect()
+        let torus_bits = self.params.k();
+        let blocks = rows.div_ceil(n);
+        let bytes = default_query_mask_tmp_bytes(module, &dst_infos, &glwe_mask);
+
+        // Each block's PRG stream is domain-separated through `block_seed`, so
+        // blocks expand independently and by-index writes keep the CRS
+        // bit-identical across thread counts.
+        let work = assign_panels(blocks, 1, num_threads(blocks));
+        let mut outputs: Vec<Option<QueryMask>> = (0..blocks).map(|_| None).collect();
+        {
+            let dst_infos = &dst_infos;
+            let glwe_mask = &glwe_mask;
+            let mut slabs: Vec<&mut [Option<QueryMask>]> = Vec::with_capacity(work.len());
+            let mut rest = outputs.as_mut_slice();
+            for group in &work {
+                let (head, tail) = rest.split_at_mut(group.len());
+                slabs.push(head);
+                rest = tail;
+            }
+            scoped_workers::<BE, Option<QueryMask>, _>(slabs, &work, bytes, |slab, group, sc| {
+                for (slot, w) in slab.iter_mut().zip(group.iter()) {
+                    let mut q = module.lwe_matrix_alloc_from_infos(dst_infos);
+                    fill_default_query_mask(
+                        module,
+                        &mut q,
+                        block_seed(crs_seed, w.panel),
+                        src_infos,
+                        glwe_mask,
+                        &mut sc.borrow(),
+                    );
+                    *slot = Some(QueryMask::new(q, torus_bits));
+                }
+            });
+        }
+        outputs.into_iter().map(|s| s.unwrap()).collect()
     }
 }
 
