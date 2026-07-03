@@ -27,6 +27,39 @@ use poulpy_hal::{
     layouts::{Backend, ScratchOwned},
 };
 
+/// One-time process-wide glibc malloc tuning for the parallel regions.
+///
+/// The offline workers allocate and free multi-MiB mask/accumulator buffers in
+/// a loop; with glibc's default dynamic thresholds those are served by `mmap`
+/// and every free returns the pages to the kernel, so the next allocation
+/// re-faults them — under 128-way concurrency the faults contend in the kernel
+/// (measured on a 32 GiB offline run: ~2× peak-RSS re-faulted, ~850 s system
+/// time, and an inflated `pack_precompute` share). Pinning the thresholds
+/// keeps freed buffers cached in the heap for reuse; `mallopt` also disables
+/// glibc's dynamic threshold adjustment. Requests that exceed a non-main
+/// arena's 64 MiB heap (e.g. per-worker scratch arenas) still fall back to
+/// `mmap` regardless of the threshold.
+///
+/// No-op outside glibc.
+pub(crate) fn tune_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            // malloc.h: M_TRIM_THRESHOLD = -1, M_MMAP_THRESHOLD = -3.
+            const M_TRIM_THRESHOLD: core::ffi::c_int = -1;
+            const M_MMAP_THRESHOLD: core::ffi::c_int = -3;
+            unsafe extern "C" {
+                fn mallopt(param: core::ffi::c_int, value: core::ffi::c_int) -> core::ffi::c_int;
+            }
+            unsafe {
+                mallopt(M_MMAP_THRESHOLD, 64 * 1024 * 1024);
+                mallopt(M_TRIM_THRESHOLD, core::ffi::c_int::MAX);
+            }
+        });
+    }
+}
+
 /// A contiguous slice `col_start..col_start + col_len` of one panel's `K`
 /// contraction blocks, assigned to a single worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

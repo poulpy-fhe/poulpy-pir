@@ -357,6 +357,7 @@ where
     /// Compatibility/internal constructor for call sites that already own
     /// instantiated parameters.
     pub fn from_params(params: Parameters<BE, [u8; 32], P>, layout: DatabaseLayout<P>) -> Self {
+        crate::parallel::tune_allocator();
         match params.collapse() {
             Collapse::Interpolation => Self::new_interpolation(params, layout),
             Collapse::Recursion { .. } => Self::new_recursion(params, layout),
