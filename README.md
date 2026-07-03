@@ -58,6 +58,28 @@ cargo run --release --example pir
 
 The example fixes the backend to the AVX2/FMA-accelerated `FFT64Avx` (`type BE = FFT64Avx`). The crate is generic over the backend, so for a portable, dependency-free build you can swap that alias for the scalar reference backend `poulpy_cpu_ref::FFT64Ref` — at a performance cost.
 
+## Tuning multi-socket (NUMA) hosts
+
+The server pins its database pages interleaved across NUMA nodes at
+construction (`mbind(MPOL_INTERLEAVE)` on Linux/x86-64), so the memory-bound
+online body product runs at both sockets' bandwidth out of the box.
+
+The offline packing precomputations, however, are ordinary heap memory, and
+the kernel's **automatic NUMA balancing** migrates their pages while the
+online packing threads stream them — on a 2-socket host this adds an
+unstable 50–250 ms to per-query latency (`recursion.l1.pack` and friends)
+and hundreds of thousands of page migrations per query. On a dedicated PIR
+server, disable it:
+
+```sh
+sudo sysctl -w kernel.numa_balancing=0
+```
+
+Measured on a 2 × 64-core Zen 4 host with a 32 GiB database, this takes a
+single-query online response from ~0.5 s (unstable) to a stable ~0.38 s.
+Batched throughput is much less sensitive — the migration churn amortizes
+over the batch.
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
