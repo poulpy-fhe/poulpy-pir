@@ -180,23 +180,28 @@ where
     }
     println!("QUERY (build {batch})            : {:?}", t.elapsed());
 
-    // ---- SERVER: answer the whole batch at once (nq = 1 is the special case),
-    // with the full per-phase timing breakdown summed over the batch. For
-    // interpolation each DB panel is read once for all queries (one i16×f64 GEMM);
-    // recursion has no batched fast path yet and sums its sequential per-query work.
+    // ---- SERVER: answer the whole batch at once (nq = 1 is the special case).
+    // `respond_batch_timed` amortizes the DB read across the batch (one i16×f64
+    // GEMM for interpolation / the recursion level-1 body select) and runs the
+    // per-query packing in parallel across the batch. The phase breakdown is
+    // *summed work* across the parallel queries, so it exceeds the wall-clock;
+    // throughput uses the measured wall-clock below.
+    let started = Instant::now();
     let (responses, online) = server.respond_batch_timed(&queries);
-    println!("ONLINE total ({batch} q)          : {:?}", online.total());
+    let online_wall = started.elapsed();
+    println!("ONLINE wall-clock ({batch} q)     : {online_wall:?}");
+    println!("ONLINE work (sum of phases)  : {:?}", online.total());
     for phase in online.phases() {
         println!("  {:<30}: {:?}", phase.name(), phase.duration());
     }
     if batch > 1 {
         println!(
-            "  per query (avg)            : {:?}",
-            online.total() / batch as u32
+            "  per query (wall-clock)     : {:?}",
+            online_wall / batch as u32
         );
         println!(
             "  throughput                 : {:.1} queries/s",
-            batch as f64 / online.total().as_secs_f64()
+            batch as f64 / online_wall.as_secs_f64()
         );
     }
 

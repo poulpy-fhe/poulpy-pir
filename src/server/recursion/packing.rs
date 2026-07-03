@@ -91,21 +91,23 @@ where
         gamma: usize,
         key_mask_source: &GLWEAutomorphismKeyCompressed<BE::OwnedBuf>,
         key_stride: usize,
+        max_threads: usize,
         timings: &mut OnlineTimings,
         phase_names: PackMaskPhaseNames,
     ) -> (
         Vec<Vec<PreparedF64<'static>>>,
         Vec<PackingPrecomputations<BE>>,
     ) {
-        // ONLINE (resp2): per-query, only `nbatches=2` here — the per-worker scratch
-        // alloc + thread spawn dwarfs the tiny work, so run sequentially.
+        // ONLINE (resp2): `nbatches` is small, but when a query is given several
+        // cores (few queries, many cores) `max_threads > 1` lets the mask-product
+        // contraction use them; at `max_threads = 1` it stays sequential.
         let (prepared, precomputes, durations) = self.precompute_pack_mask_inner(
             all_digits,
             q_masks,
             gamma,
             key_mask_source,
             key_stride,
-            1,
+            max_threads,
         );
         timings.add_prepare_db(phase_names.prepare_db, durations.prepare_db);
         timings.add_mask_product(phase_names.mask_product, durations.mask_product);
@@ -237,6 +239,7 @@ where
         q_masks: &[QueryMask],
         gamma: usize,
         key: &KeyBundle<'_, BE>,
+        max_threads: usize,
         timings: &mut OnlineTimings,
     ) -> (
         Vec<Vec<PreparedF64<'static>>>,
@@ -248,6 +251,7 @@ where
             gamma,
             key.key,
             key.stride,
+            max_threads,
             timings,
             PackMaskPhaseNames {
                 prepare_db: "recursion.resp2.prepare_db",

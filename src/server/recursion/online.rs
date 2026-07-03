@@ -103,12 +103,77 @@ where
                 self.recursion_l1_bodies(chunk_queries, size, base2k, torus_bits, t, gamma0);
             chunk_timings.add_body_product("recursion.l1.body_product", started.elapsed());
 
-            // Per-query FHE finish (pack / decompose / resp1 / resp2).
-            for (query, bodies) in chunk_queries.iter().zip(all_bodies) {
-                let mut per_query = OnlineTimings::default();
-                let response = self.recursion_finish_from_bodies(query, bodies, &mut per_query);
-                chunk_timings.accumulate(&per_query);
-                responses.push(response);
+            // Per-query FHE finish (pack / decompose / resp1 / resp2), run in
+            // parallel across the queries. Thread policy: with at least as many
+            // queries as cores, one core per query (queries run in parallel, each
+            // pack single-threaded); with fewer queries than cores, several cores
+            // per query (queries still run in parallel, each pack uses `cores / nq`
+            // threads). Either way every core stays busy.
+            let nq = chunk_queries.len();
+            let cores = num_threads(usize::MAX);
+            let threads_per_query = (cores / nq).max(1);
+            let parallel_queries = (cores / threads_per_query).min(nq).max(1);
+            let pool_needed = parallel_queries * threads_per_query;
+
+            // Move the scratch pool out of `self` so the workers can borrow `&self`
+            // while holding disjoint pool slices; reused across chunks, then restored.
+            let mut pool = std::mem::take(&mut self.scratch_pool);
+            let pack_bytes = self.scratch_for_pack();
+            while pool.len() < pool_needed {
+                pool.push(ScratchOwned::<BE>::alloc(pack_bytes));
+            }
+
+            let mut resp_slots: Vec<Option<Response<BE>>> = (0..nq).map(|_| None).collect();
+            let mut worker_timings: Vec<OnlineTimings> =
+                (0..parallel_queries).map(|_| OnlineTimings::default()).collect();
+            {
+                let this = &*self;
+                let mut bodies_iter = all_bodies.into_iter();
+                let mut pool_rest = &mut pool[..pool_needed];
+                let mut resp_rest = resp_slots.as_mut_slice();
+                let mut tl_rest = worker_timings.as_mut_slice();
+                let base = nq / parallel_queries;
+                let rem = nq % parallel_queries;
+                let mut q_start = 0;
+                std::thread::scope(|scope| {
+                    for w in 0..parallel_queries {
+                        let qcount = base + usize::from(w < rem);
+                        let (pool_slab, pr) = pool_rest.split_at_mut(threads_per_query);
+                        pool_rest = pr;
+                        let (resp_slab, rr) = resp_rest.split_at_mut(qcount);
+                        resp_rest = rr;
+                        let (tl_slab, tr) = tl_rest.split_at_mut(1);
+                        tl_rest = tr;
+                        let worker_bodies: Vec<Vec<VecZnx<BE::OwnedBuf>>> =
+                            bodies_iter.by_ref().take(qcount).collect();
+                        let worker_queries = &chunk_queries[q_start..q_start + qcount];
+                        q_start += qcount;
+                        scope.spawn(move || {
+                            let tl = &mut tl_slab[0];
+                            for (i, (query, bodies)) in
+                                worker_queries.iter().zip(worker_bodies).enumerate()
+                            {
+                                let mut per_query = OnlineTimings::default();
+                                let response = this.recursion_finish_from_bodies(
+                                    query,
+                                    bodies,
+                                    pool_slab,
+                                    threads_per_query,
+                                    &mut per_query,
+                                );
+                                tl.accumulate(&per_query);
+                                resp_slab[i] = Some(response);
+                            }
+                        });
+                    }
+                });
+            }
+            self.scratch_pool = pool;
+            for tl in &worker_timings {
+                chunk_timings.accumulate(tl);
+            }
+            for slot in resp_slots {
+                responses.push(slot.expect("recursion finish worker did not fill its slot"));
             }
             timings.accumulate(&chunk_timings);
         }
@@ -226,9 +291,11 @@ where
     /// key-precompute, pack, decompose, and (small) `resp1`/`resp2` body-product
     /// phases into `timings`.
     fn recursion_finish_from_bodies(
-        &mut self,
+        &self,
         query: &RecursionQuery<BE>,
         bodies: Vec<VecZnx<BE::OwnedBuf>>,
+        pool: &mut [ScratchOwned<BE>],
+        max_threads: usize,
         timings: &mut OnlineTimings,
     ) -> Response<BE> {
         let t = self.database.t();
@@ -252,14 +319,14 @@ where
             )
         };
 
+        // Key precompute is single-threaded and runs before the packs, so it
+        // reuses this worker's first pool arena (`pool[0]`).
         let started = Instant::now();
-        let key0 = self.prepare_query_key(&query.keys.gamma0);
-        let key1 = self.prepare_query_key(&query.keys.gamma1);
-        let key2 = self.prepare_query_key(&query.keys.gamma2);
+        let key0 = self.prepare_query_key(&query.keys.gamma0, &mut pool[0]);
+        let key1 = self.prepare_query_key(&query.keys.gamma1, &mut pool[0]);
+        let key2 = self.prepare_query_key(&query.keys.gamma2, &mut pool[0]);
         timings.add_key_precompute("recursion.key_precompute", started.elapsed());
 
-        // Field-level borrows (not the `&self` accessors) so the pooled packs below
-        // can take `&mut self.scratch_pool` disjointly.
         let ServerPrecomputation::Recursion(off) = &self.precomputation else {
             panic!("recursion respond requested for non-recursion server");
         };
@@ -283,7 +350,7 @@ where
             qtilde_bits,
             &inputs,
             &key0.precomp,
-            &mut self.scratch_pool,
+            pool,
         );
         timings.add_pack("recursion.l1.pack", started.elapsed());
 
@@ -313,7 +380,7 @@ where
             &query.src1,
             &key1.precomp,
             gemm,
-            &mut self.scratch_pool,
+            pool,
         );
         timings.add_body_product("recursion.resp1.body_product", resp1_body);
         timings.add_pack("recursion.resp1.pack", resp1_pack);
@@ -321,7 +388,7 @@ where
         // resp2: the digit DB is query-dependent (mask precompute runs online).
         let q1_masks = &state.q1_masks;
         let (resp2_prepared, resp2_precomputes) =
-            self.precompute_pack_mask_online(&body_data, q1_masks, gamma2, &key2, timings);
+            self.precompute_pack_mask_online(&body_data, q1_masks, gamma2, &key2, max_threads, timings);
         let (resp2, resp2_body, resp2_pack) = pack_bodies_pooled(
             module,
             &state.src_infos,
@@ -334,7 +401,7 @@ where
             &query.src1,
             &key2.precomp,
             gemm,
-            &mut self.scratch_pool,
+            pool,
         );
         timings.add_body_product("recursion.resp2.body_product", resp2_body);
         timings.add_pack("recursion.resp2.pack", resp2_pack);
@@ -342,12 +409,16 @@ where
         Response::Recursion(RecursionResponse::new(resp1, resp2))
     }
 
-    fn prepare_query_key<'q>(&mut self, ck: &'q CompressedKey<BE>) -> KeyBundle<'q, BE> {
+    fn prepare_query_key<'q>(
+        &self,
+        ck: &'q CompressedKey<BE>,
+        scratch: &mut ScratchOwned<BE>,
+    ) -> KeyBundle<'q, BE> {
         let precomp = self.params.module().pack_partial_keys_precompute(
             &ck.key,
             ck.stride,
             self.params.baby_size(),
-            &mut self.scratch.borrow(),
+            &mut scratch.borrow(),
         );
         KeyBundle {
             key: &ck.key,

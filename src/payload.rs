@@ -5,7 +5,10 @@ pub type U256P65535 = P65535<[u8; 32]>;
 /// 256-bit payload as 16 base-65536 (`2¹⁶`) digits (InsPIRe² regime, `p = 2¹⁶`).
 pub type U256P65536 = P65536<[u8; 32]>;
 
-pub trait Payload<B> {
+/// `Sync` supertrait: payloads are zero-sized type markers, so they are always
+/// `Sync`; requiring it lets `Server<BE, P>` be shared across scoped threads (the
+/// parallel batched recursion finish borrows `&Server` in worker threads).
+pub trait Payload<B>: Sync {
     /// Digit radix `p`. A `u32` because `2¹⁶ = 65536` does not fit a `u16`.
     const BASIS: u32;
     const EXPONENT: usize;
