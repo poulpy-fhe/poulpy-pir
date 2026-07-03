@@ -3,12 +3,128 @@ use std::marker::PhantomData;
 use poulpy_core::layouts::ModuleCoreAlloc;
 use poulpy_hal::layouts::{Backend, Module};
 
-use crate::payload::Payload;
+use crate::{parallel::num_threads, payload::Payload};
 
 use super::{
     CoeffMatrix, address::Address, layout::DatabaseLayout,
     preprocessing::DatabasePreprocessingConfig,
 };
+
+/// Spread the zeroed matrices' physical pages across the NUMA nodes and commit
+/// them from parallel workers. `vec![0; …]` maps its pages lazily, so without
+/// this every page is first-touched by the (sequential) `encode_shard` caller
+/// and the whole DB lands on one node, throttling the memory-bound online body
+/// GEMV to one node's bandwidth (measured ~0.9–1.5 s instead of ~140 ms for a
+/// 32 GiB DB at one query).
+///
+/// Placement is pinned with an explicit `mbind(MPOL_INTERLEAVE)` per block
+/// where available (Linux/x86-64, multi-node): plain first-touch spreading is
+/// silently undone by automatic NUMA balancing, which watches the sequential
+/// `encode_shard` writer stream the whole DB and migrates the pages back to
+/// its node — an explicit VMA policy is exempt from that. Where `mbind` is
+/// unavailable the round-robin parallel touch still spreads pages at block
+/// granularity (and the pre-fault alone takes ~12 s off the 32 GiB fill).
+fn first_touch_matrices(matrices: &mut [CoeffMatrix]) {
+    let nthreads = num_threads(matrices.len());
+    if nthreads <= 1 {
+        return;
+    }
+    let mut buckets: Vec<Vec<&mut CoeffMatrix>> = (0..nthreads).map(|_| Vec::new()).collect();
+    for (i, m) in matrices.iter_mut().enumerate() {
+        buckets[i % nthreads].push(m);
+    }
+    std::thread::scope(|scope| {
+        for bucket in buckets {
+            scope.spawn(move || {
+                for m in bucket {
+                    numa::interleave(m.flat().as_ptr().cast(), size_of_val(m.flat()));
+                    m.first_touch();
+                }
+            });
+        }
+    });
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod numa {
+    use std::sync::OnceLock;
+
+    /// Bitmask of online NUMA nodes (bit `i` = node `i`); 0 when unknown,
+    /// single-node, or beyond 64 nodes (all "leave placement alone" cases).
+    fn online_nodes() -> u64 {
+        static MASK: OnceLock<u64> = OnceLock::new();
+        *MASK.get_or_init(|| {
+            let Ok(s) = std::fs::read_to_string("/sys/devices/system/node/online") else {
+                return 0;
+            };
+            let mut mask = 0u64;
+            for part in s.trim().split(',') {
+                let mut ends = part.splitn(2, '-');
+                let Some(Ok(lo)) = ends.next().map(str::parse::<u32>) else {
+                    return 0;
+                };
+                let hi = match ends.next().map(str::parse::<u32>) {
+                    Some(Ok(hi)) => hi,
+                    Some(Err(_)) => return 0,
+                    None => lo,
+                };
+                if hi >= 64 {
+                    return 0;
+                }
+                for n in lo..=hi {
+                    mask |= 1 << n;
+                }
+            }
+            if mask.count_ones() >= 2 { mask } else { 0 }
+        })
+    }
+
+    /// Apply `MPOL_INTERLEAVE` over all online nodes to the whole pages inside
+    /// `[ptr, ptr + len)`. Pages faulted afterwards are placed round-robin
+    /// across the nodes, and the explicit VMA policy exempts them from
+    /// automatic NUMA balancing. Best-effort: on any failure the pages simply
+    /// keep first-touch placement.
+    pub(super) fn interleave(ptr: *const u8, len: usize) {
+        let nodes = online_nodes();
+        if nodes == 0 {
+            return;
+        }
+        const PAGE: usize = 4096;
+        // Round inward: partial edge pages may be shared with neighboring heap
+        // allocations, so leave their policy untouched.
+        let start = (ptr as usize).next_multiple_of(PAGE);
+        let end = (ptr as usize + len) & !(PAGE - 1);
+        if end <= start {
+            return;
+        }
+        const SYS_MBIND: core::ffi::c_long = 237;
+        const MPOL_INTERLEAVE: usize = 3;
+        unsafe extern "C" {
+            fn syscall(num: core::ffi::c_long, ...) -> core::ffi::c_long;
+        }
+        let mask = [nodes];
+        // SAFETY: mbind only sets the placement policy of pages in our own
+        // address range; it reads `mask` (valid for the 64 node bits declared
+        // by `maxnode`) and never touches the memory contents.
+        unsafe {
+            syscall(
+                SYS_MBIND,
+                start,
+                end - start,
+                MPOL_INTERLEAVE,
+                mask.as_ptr(),
+                64usize,
+                0usize,
+            );
+        }
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+mod numa {
+    /// No-op off Linux/x86-64: pages keep the round-robin first-touch spread.
+    pub(super) fn interleave(_ptr: *const u8, _len: usize) {}
+}
 
 /// The raw PIR database: `physical_rows · block_cols` `n x n` `i16`
 /// coefficient sub-matrices, ordered `matrices[row_group · block_cols + block]`.
@@ -207,9 +323,10 @@ where
         );
         let rows_per_group = n / column_height;
         let physical_rows = grid_rows.div_ceil(rows_per_group);
-        let matrices = (0..physical_rows * layout.column_blocks(n))
+        let mut matrices: Vec<CoeffMatrix> = (0..physical_rows * layout.column_blocks(n))
             .map(|_| CoeffMatrix::zeros(n, n))
             .collect();
+        first_touch_matrices(&mut matrices);
         Self {
             matrices,
             n,
@@ -233,9 +350,10 @@ where
             "db_entries must be a multiple of n·cols"
         );
         let blocks = cols / n;
-        let matrices = (0..(db_entries / per_matrix) * blocks)
+        let mut matrices: Vec<CoeffMatrix> = (0..(db_entries / per_matrix) * blocks)
             .map(|_| CoeffMatrix::zeros(n, n))
             .collect();
+        first_touch_matrices(&mut matrices);
         Self {
             matrices,
             n,
