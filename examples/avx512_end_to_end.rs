@@ -115,6 +115,22 @@ fn format_bytes(bytes: f64) -> String {
     format!("{value:.3} {}", UNITS[unit])
 }
 
+/// Fill `out` with payloads whose content depends only on the payload index
+/// (splitmix64 over `index * 4 + word`), so the DB is identical across runs
+/// and thread counts.
+fn fill_payloads(out: &mut [[u8; 32]], first_index: usize) {
+    for (i, payload) in out.iter_mut().enumerate() {
+        let index = (first_index + i) as u64;
+        for word in 0..4u64 {
+            let mut x = (index * 4 + word).wrapping_add(0x9e3779b97f4a7c15);
+            x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+            x ^= x >> 31;
+            payload[word as usize * 8..][..8].copy_from_slice(&x.to_le_bytes());
+        }
+    }
+}
+
 fn run<P>(config: Config<[u8; 32], P>, layout: DatabaseLayout<P>, requested_item: usize, batch: usize)
 where
     P: Payload<[u8; 32]>,
@@ -139,16 +155,30 @@ where
     let setup = timer.elapsed();
     println!("SETUP                        : {:?}", setup);
 
-    // ---- SERVER: fill with random 256-bit payloads. ----
+    // ---- SERVER: fill with pseudorandom 256-bit payloads. Content is derived
+    // from the payload index (splitmix64), so runs are reproducible and the
+    // fill parallelizes: workers generate disjoint chunks while `update_shard`
+    // stays sequential (it needs `&mut server`).
     let t = Instant::now();
     let chunk = 1usize << 16;
-    let mut buf = vec![[0u8; 32]; chunk];
+    let workers = std::thread::available_parallelism().map_or(1, |x| x.get());
+    let mut bufs: Vec<Vec<[u8; 32]>> = (0..workers).map(|_| vec![[0u8; 32]; chunk]).collect();
     let mut start = 0;
     while start < capacity {
-        let len = chunk.min(capacity - start);
-        getrandom::fill(buf[..len].as_flattened_mut()).expect("OS entropy");
-        server.update_shard(start, &buf[..len]);
-        start += len;
+        let active = ((capacity - start).div_ceil(chunk)).min(workers);
+        std::thread::scope(|scope| {
+            for (w, buf) in bufs[..active].iter_mut().enumerate() {
+                let chunk_start = start + w * chunk;
+                let len = chunk.min(capacity - chunk_start);
+                scope.spawn(move || fill_payloads(&mut buf[..len], chunk_start));
+            }
+        });
+        for (w, buf) in bufs[..active].iter().enumerate() {
+            let chunk_start = start + w * chunk;
+            let len = chunk.min(capacity - chunk_start);
+            server.update_shard(chunk_start, &buf[..len]);
+        }
+        start += active * chunk;
     }
     println!("database fill                : {:?}", t.elapsed());
 
