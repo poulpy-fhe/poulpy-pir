@@ -24,11 +24,33 @@ fn main() {
     let flops = 2.0 * (K as f64) * (ROWS_OUT as f64) * (ROWS_IN as f64) * (LWE_N as f64);
 
     println!("mask_product bench (rows_out={ROWS_OUT}, rows_in={ROWS_IN}, lwe_n={LWE_N}, K={K})");
+
+    // Bit-exactness: N-split and strip variants vs the sequential reference.
+    let reference = mask_product_acc(&prepared, &masks, 1);
+    for nt in [2usize, 7, 16, 32] {
+        let got = mask_product_acc_nsplit(&prepared, &masks, nt);
+        let diffs = reference
+            .iter()
+            .zip(&got)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        println!("  nsplit nt={nt:<3} vs sequential: {diffs} differing values");
+    }
+    for strip in [512usize, 256] {
+        let got = mask_product_acc_strips(&prepared, &masks, strip);
+        let diffs = reference
+            .iter()
+            .zip(&got)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        println!("  strips n={strip:<4} vs sequential: {diffs} differing values");
+    }
+
+    println!("== K-split (partials + reduction, status quo) ==");
     println!(
         "  {:<10}{:>12}{:>12}{:>12}",
         "threads", "ms", "GFLOP/s", "speedup"
     );
-
     let mut base_ms = 0.0;
     for nt in [1usize, 2, 4, 8, 16] {
         let avg = time_average(ITERS, || {
@@ -47,6 +69,38 @@ fn main() {
             gflops,
             base_ms / ms
         );
+    }
+
+    println!("== N-split (disjoint dst column strips, no reduction) ==");
+    println!(
+        "  {:<10}{:>12}{:>12}{:>12}",
+        "threads", "ms", "GFLOP/s", "speedup"
+    );
+    for nt in [1usize, 2, 4, 8, 16, 32] {
+        let avg = time_average(ITERS, || {
+            let acc = mask_product_acc_nsplit(&prepared, &masks, nt);
+            black_box(acc[0]);
+        });
+        let ms = millis(avg);
+        let gflops = flops / (avg.as_secs_f64() * 1e9);
+        println!(
+            "  {:<10}{:>12.3}{:>12.1}{:>12.2}",
+            nt,
+            ms,
+            gflops,
+            base_ms / ms
+        );
+    }
+
+    println!("== single-thread dst strip width (cache-blocking probe) ==");
+    println!("  {:<10}{:>12}{:>12}", "strip_n", "ms", "GFLOP/s");
+    for strip in [LWE_N, 1024, 512, 256, 128] {
+        let avg = time_average(ITERS, || {
+            let acc = mask_product_acc_strips(&prepared, &masks, strip);
+            black_box(acc[0]);
+        });
+        let gflops = flops / (avg.as_secs_f64() * 1e9);
+        println!("  {:<10}{:>12.3}{:>12.1}", strip, millis(avg), gflops);
     }
 }
 
@@ -135,6 +189,113 @@ fn accumulate_range(
             u.rows_out,
             u.rows_in,
             LWE_N,
+        );
+    }
+}
+
+/// N-split: each thread owns a contiguous strip of dst *columns* and runs the
+/// full K contraction for it in ascending block order. No partial buffers, no
+/// reduction, and every output value is produced by exactly one thread with a
+/// fixed accumulation order, so the result is bit-identical for every `nt`.
+fn mask_product_acc_nsplit(prepared: &[Panel], masks: &[Mask], nt: usize) -> Vec<f64> {
+    let nt = nt.clamp(1, LWE_N);
+    let mut acc = vec![0.0f64; ROWS_OUT * LWE_N];
+    let base = LWE_N / nt;
+    let rem = LWE_N % nt;
+    struct SendPtr(*mut f64);
+    unsafe impl Send for SendPtr {}
+    unsafe impl Sync for SendPtr {}
+    let acc_ptr = SendPtr(acc.as_mut_ptr());
+    let acc_ref = &acc_ptr;
+    std::thread::scope(|scope| {
+        let mut col = 0;
+        for i in 0..nt {
+            let width = base + usize::from(i < rem);
+            let col_start = col;
+            col += width;
+            scope.spawn(move || {
+                let dst = unsafe { acc_ref.0.add(col_start) };
+                for bc in 0..K {
+                    let u = &prepared[bc];
+                    gemm_f64_add_cols(
+                        dst,
+                        &u.values,
+                        &masks[bc].values[col_start..],
+                        u.rows_out,
+                        u.rows_in,
+                        width,
+                        LWE_N,
+                    );
+                }
+            });
+        }
+    });
+    acc
+}
+
+/// Sequential, but the dst (and rhs) columns are processed in strips of
+/// `strip_n`, shrinking the dst tile per GEMM call.
+fn mask_product_acc_strips(prepared: &[Panel], masks: &[Mask], strip_n: usize) -> Vec<f64> {
+    let mut acc = vec![0.0f64; ROWS_OUT * LWE_N];
+    let mut col = 0;
+    while col < LWE_N {
+        let width = strip_n.min(LWE_N - col);
+        for bc in 0..K {
+            let u = &prepared[bc];
+            gemm_f64_add_cols(
+                unsafe { acc.as_mut_ptr().add(col) },
+                &u.values,
+                &masks[bc].values[col..],
+                u.rows_out,
+                u.rows_in,
+                width,
+                LWE_N,
+            );
+        }
+        col += width;
+    }
+    acc
+}
+
+/// `dst[.., 0..n_cols] += lhs * rhs[.., 0..n_cols]` where dst and rhs are
+/// column strips of row-major matrices with row stride `stride`.
+fn gemm_f64_add_cols(
+    dst: *mut f64,
+    lhs: &[f64],
+    rhs: &[f64],
+    m: usize,
+    k: usize,
+    n_cols: usize,
+    stride: usize,
+) {
+    let alpha = 1.0f64;
+    unsafe {
+        private_gemm_x86::gemm(
+            private_gemm_x86::DType::F64,
+            private_gemm_x86::IType::U64,
+            gemm_instr_set(),
+            m,
+            n_cols,
+            k,
+            dst.cast(),
+            stride as isize,
+            1,
+            core::ptr::null(),
+            core::ptr::null(),
+            private_gemm_x86::DstKind::Full,
+            private_gemm_x86::Accum::Add,
+            lhs.as_ptr().cast(),
+            k as isize,
+            1,
+            false,
+            core::ptr::null(),
+            0,
+            rhs.as_ptr().cast(),
+            stride as isize,
+            1,
+            false,
+            (&raw const alpha).cast(),
+            1,
         );
     }
 }

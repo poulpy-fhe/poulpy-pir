@@ -263,13 +263,16 @@ fn full_torus_f64_mask_product<BE>(
     encode_torus_mask_f64::<BE>(out, &acc, rows_out, lwe_n, torus_bits);
 }
 
-/// The pure-`f64` mask accumulation `sum_bc U_bc · A_bc`, optionally block-tiled
+/// The pure-`f64` mask accumulation `sum_bc U_bc · A_bc`, optionally split
 /// across `mask_threads` threads. `mask_threads <= 1` is the exact sequential
-/// left-fold (reference order). For `nt > 1` the `bc` range is split into `nt`
-/// contiguous ascending groups summed in parallel, then the partials are reduced
-/// in ascending group order — deterministic for a given `nt`, but not
-/// bit-identical to the sequential fold across different `nt` (f64 addition is
-/// non-associative; the gap is far below the FHE noise floor).
+/// left-fold (reference order). For `nt > 1` the dst *columns* are split into
+/// `nt` contiguous strips; each worker runs the full ascending-`bc` contraction
+/// for its own strip. Every output element is a single full-depth dot product
+/// accumulated in the reference block order by exactly one thread — no partial
+/// accumulators, no cross-thread reduction — so unlike a `bc`-range split the
+/// result does not depend on `nt` (measured bit-identical to the sequential
+/// fold on the private-gemm kernel; at worst a few ulps if a kernel's internal
+/// order were width-dependent, far below the FHE noise floor).
 fn mask_product_acc(
     prepared: &[PreparedF64],
     masks: &[QueryMask],
@@ -279,36 +282,71 @@ fn mask_product_acc(
     gemm: &dyn Gemm,
 ) -> Vec<f64> {
     let k = prepared.len();
-    let nt = mask_threads.clamp(1, k);
+    let nt = mask_threads.clamp(1, lwe_n);
     if nt <= 1 {
         let mut acc = vec![0.0f64; rows_out * lwe_n];
         accumulate_mask_range(&mut acc, prepared, masks, rows_out, lwe_n, 0..k, gemm);
         return acc;
     }
 
-    let base = k / nt;
-    let rem = k % nt;
-    let mut ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(nt);
-    let mut start = 0;
+    let base = lwe_n / nt;
+    let rem = lwe_n % nt;
+    let mut strips: Vec<(usize, usize)> = Vec::with_capacity(nt); // (col_start, width)
+    let mut col = 0;
     for i in 0..nt {
-        let len = base + usize::from(i < rem);
-        ranges.push(start..start + len);
-        start += len;
+        let width = base + usize::from(i < rem);
+        strips.push((col, width));
+        col += width;
     }
-    let mut partials: Vec<Vec<f64>> = (0..nt).map(|_| vec![0.0f64; rows_out * lwe_n]).collect();
+    let mut acc = vec![0.0f64; rows_out * lwe_n];
     std::thread::scope(|scope| {
-        for (part, range) in partials.iter_mut().zip(ranges.into_iter()) {
-            scope.spawn(move || {
-                accumulate_mask_range(part, prepared, masks, rows_out, lwe_n, range, gemm);
-            });
+        let handles: Vec<_> = strips
+            .iter()
+            .map(|&(col_start, width)| {
+                scope.spawn(move || {
+                    // Thread-local contiguous strip accumulator plus a
+                    // contiguous copy of the rhs column strip, contracted with
+                    // the *same* widen + dense-GEMM kernel as the sequential
+                    // fold (the kernel's per-column accumulation order is
+                    // width-independent, which is what makes the strips
+                    // bit-identical to the reference; the trait's i16 entry
+                    // point would delegate width 1 to the GEMV kernel and
+                    // break that). The widen is O(panel) per thread and
+                    // negligible against the O(n³/nt) strip GEMM.
+                    let mut local = vec![0.0f64; rows_out * width];
+                    let mut wide: Vec<f64> = Vec::new();
+                    let mut rhs_strip: Vec<f64> = Vec::new();
+                    for bc in 0..k {
+                        let u = &prepared[bc];
+                        let rhs = &masks[bc];
+                        rhs_strip.resize(u.rows_in * width, 0.0);
+                        for r in 0..u.rows_in {
+                            let src = r * lwe_n + col_start;
+                            rhs_strip[r * width..(r + 1) * width]
+                                .copy_from_slice(&rhs.values[src..src + width]);
+                        }
+                        u.widen_into(&mut wide);
+                        gemm.gemm_f64_add(
+                            &mut local,
+                            &wide,
+                            &rhs_strip,
+                            rows_out,
+                            u.rows_in,
+                            width,
+                        );
+                    }
+                    (col_start, width, local)
+                })
+            })
+            .collect();
+        for handle in handles {
+            let (col_start, width, local) = handle.join().unwrap();
+            for r in 0..rows_out {
+                let dst = r * lwe_n + col_start;
+                acc[dst..dst + width].copy_from_slice(&local[r * width..(r + 1) * width]);
+            }
         }
     });
-    let mut acc = std::mem::take(&mut partials[0]);
-    for part in &partials[1..] {
-        for (a, p) in acc.iter_mut().zip(part.iter()) {
-            *a += *p;
-        }
-    }
     acc
 }
 
