@@ -3,47 +3,21 @@ use std::marker::PhantomData;
 use poulpy_core::layouts::ModuleCoreAlloc;
 use poulpy_hal::layouts::{Backend, Module};
 
-use crate::{numa, parallel::num_threads, payload::Payload};
+use crate::payload::Payload;
 
 use super::{
     CoeffMatrix, address::Address, layout::DatabaseLayout,
     preprocessing::DatabasePreprocessingConfig,
 };
 
-/// Spread the zeroed matrices' physical pages across the NUMA nodes and commit
-/// them from parallel workers. `vec![0; …]` maps its pages lazily, so without
-/// this every page is first-touched by the (sequential) `encode_shard` caller
-/// and the whole DB lands on one node, throttling the memory-bound online body
-/// GEMV to one node's bandwidth (measured ~0.9–1.5 s instead of ~140 ms for a
-/// 32 GiB DB at one query).
-///
-/// Placement is pinned with an explicit `mbind(MPOL_INTERLEAVE)` per block
-/// where available (Linux/x86-64, multi-node): plain first-touch spreading is
-/// silently undone by automatic NUMA balancing, which watches the sequential
-/// `encode_shard` writer stream the whole DB and migrates the pages back to
-/// its node — an explicit VMA policy is exempt from that. Where `mbind` is
-/// unavailable the round-robin parallel touch still spreads pages at block
-/// granularity (and the pre-fault alone takes ~12 s off the 32 GiB fill).
-fn first_touch_matrices(matrices: &mut [CoeffMatrix]) {
-    let nthreads = num_threads(matrices.len());
-    if nthreads <= 1 {
-        return;
-    }
-    let mut buckets: Vec<Vec<&mut CoeffMatrix>> = (0..nthreads).map(|_| Vec::new()).collect();
-    for (i, m) in matrices.iter_mut().enumerate() {
-        buckets[i % nthreads].push(m);
-    }
-    std::thread::scope(|scope| {
-        for bucket in buckets {
-            scope.spawn(move || {
-                for m in bucket {
-                    numa::interleave(m.flat().as_ptr().cast(), size_of_val(m.flat()));
-                    m.first_touch();
-                }
-            });
-        }
-    });
-}
+// NOTE (NUMA): the DB deliberately gets NO explicit placement — batched
+// serving measures ~12% faster when automatic NUMA balancing is left free to
+// migrate the hot blocks adaptively than under any static policy tried
+// (blanket interleave, per-row-group node binding with pinned workers, or a
+// parallel first-touch spread). The cost is single-query body-product latency
+// on multi-socket hosts (the whole DB is first-touched onto the sequential
+// fill writer's node); a latency-focused deployment can recover that with
+// `numactl --interleave=all` at the cost of the offline GEMM.
 
 /// The raw PIR database: `physical_rows · block_cols` `n x n` `i16`
 /// coefficient sub-matrices, ordered `matrices[row_group · block_cols + block]`.
@@ -242,10 +216,9 @@ where
         );
         let rows_per_group = n / column_height;
         let physical_rows = grid_rows.div_ceil(rows_per_group);
-        let mut matrices: Vec<CoeffMatrix> = (0..physical_rows * layout.column_blocks(n))
+        let matrices = (0..physical_rows * layout.column_blocks(n))
             .map(|_| CoeffMatrix::zeros(n, n))
             .collect();
-        first_touch_matrices(&mut matrices);
         Self {
             matrices,
             n,
@@ -269,10 +242,9 @@ where
             "db_entries must be a multiple of n·cols"
         );
         let blocks = cols / n;
-        let mut matrices: Vec<CoeffMatrix> = (0..(db_entries / per_matrix) * blocks)
+        let matrices = (0..(db_entries / per_matrix) * blocks)
             .map(|_| CoeffMatrix::zeros(n, n))
             .collect();
-        first_touch_matrices(&mut matrices);
         Self {
             matrices,
             n,

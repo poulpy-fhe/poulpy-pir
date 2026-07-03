@@ -57,21 +57,4 @@ impl CoeffMatrix {
     pub fn zero(&mut self) {
         self.data.fill(0);
     }
-
-    /// Write one value per 4 KiB page so the physical pages are committed on
-    /// the NUMA node of the *calling thread* (first-touch). The freshly
-    /// allocated matrix is zeroed but lazily mapped, so the writes preserve
-    /// every value. Volatile because the allocation is known-zeroed and a
-    /// plain `= 0` store could legally be elided — the page fault is the
-    /// entire point.
-    pub(crate) fn first_touch(&mut self) {
-        const I16_PER_PAGE: usize = 4096 / size_of::<i16>();
-        let ptr = self.data.as_mut_ptr();
-        let mut i = 0;
-        while i < self.data.len() {
-            // SAFETY: `i < len`, so the pointer is in bounds.
-            unsafe { std::ptr::write_volatile(ptr.add(i), 0) };
-            i += I16_PER_PAGE;
-        }
-    }
 }

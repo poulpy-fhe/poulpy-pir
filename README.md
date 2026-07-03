@@ -60,28 +60,33 @@ The example fixes the backend to the AVX2/FMA-accelerated `FFT64Avx` (`type BE =
 
 ## Tuning multi-socket (NUMA) hosts
 
-The server pins an explicit NUMA placement policy (`mbind(MPOL_INTERLEAVE)`
-on Linux/x86-64) on its two large long-lived read-shared structures: the
-database pages at construction, and the offline packing precomputes at the
-end of `offline()`. Interleaving lets the memory-bound online body product
-run at both sockets' bandwidth, and — just as important — the explicit VMA
-policy exempts those pages from the kernel's **automatic NUMA balancing**,
-whose hint faults and migrations otherwise add an unstable 50–250 ms to
-per-query pack latency while the online workers stream the precomputes.
+The server is tuned with **batched throughput as the priority**. Two
+placement decisions follow from measurements on a 2 × 64-core Zen 4 host
+with a 32 GiB database (batch 256):
 
-The remaining per-query buffers (scratch arenas, response bodies) stay under
-the default policy, so automatic balancing still costs a little. On a
-dedicated PIR server you can disable it for the last word in latency:
+- The offline packing precomputes get an explicit `mbind(MPOL_INTERLEAVE)`
+  policy at the end of `offline()` (Linux/x86-64). The explicit VMA policy
+  exempts them from the kernel's **automatic NUMA balancing**, whose hint
+  faults and migrations otherwise add an unstable 50–250 ms to per-query
+  pack latency while the online workers stream them. This is neutral for
+  batch throughput.
+- The database itself deliberately gets **no explicit placement**: batched
+  serving measures ~12% faster when automatic balancing is left free to
+  migrate the hot DB blocks adaptively than under any static policy tried
+  (blanket interleave, per-row-group node binding with pinned workers, or a
+  parallel first-touch spread). The trade-off is single-query latency: the
+  DB is first-touched onto the fill writer's node, so a lone query's
+  memory-bound body product runs at one node's bandwidth. Latency-focused
+  deployments can run under `numactl --interleave=all` (helps the online
+  phases, costs the offline GEMM ~15%).
+
+On a dedicated batch-serving host, also consider disabling automatic
+balancing entirely — it was worth another ~5–8% batch throughput in our
+measurements, on top of removing per-query jitter:
 
 ```sh
 sudo sysctl -w kernel.numa_balancing=0
 ```
-
-Measured on a 2 × 64-core Zen 4 host with a 32 GiB database (single query):
-~1.0 s online before any placement work; ~0.48 s with the built-in pinning
-and balancing left on; ~0.38 s with balancing also disabled. Batched
-throughput is much less sensitive — the churn amortizes over the batch
-(≈115 ms/query at batch 64 regardless).
 
 ## License
 
