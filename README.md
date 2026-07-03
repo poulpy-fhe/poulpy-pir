@@ -60,25 +60,28 @@ The example fixes the backend to the AVX2/FMA-accelerated `FFT64Avx` (`type BE =
 
 ## Tuning multi-socket (NUMA) hosts
 
-The server pins its database pages interleaved across NUMA nodes at
-construction (`mbind(MPOL_INTERLEAVE)` on Linux/x86-64), so the memory-bound
-online body product runs at both sockets' bandwidth out of the box.
+The server pins an explicit NUMA placement policy (`mbind(MPOL_INTERLEAVE)`
+on Linux/x86-64) on its two large long-lived read-shared structures: the
+database pages at construction, and the offline packing precomputes at the
+end of `offline()`. Interleaving lets the memory-bound online body product
+run at both sockets' bandwidth, and — just as important — the explicit VMA
+policy exempts those pages from the kernel's **automatic NUMA balancing**,
+whose hint faults and migrations otherwise add an unstable 50–250 ms to
+per-query pack latency while the online workers stream the precomputes.
 
-The offline packing precomputations, however, are ordinary heap memory, and
-the kernel's **automatic NUMA balancing** migrates their pages while the
-online packing threads stream them — on a 2-socket host this adds an
-unstable 50–250 ms to per-query latency (`recursion.l1.pack` and friends)
-and hundreds of thousands of page migrations per query. On a dedicated PIR
-server, disable it:
+The remaining per-query buffers (scratch arenas, response bodies) stay under
+the default policy, so automatic balancing still costs a little. On a
+dedicated PIR server you can disable it for the last word in latency:
 
 ```sh
 sudo sysctl -w kernel.numa_balancing=0
 ```
 
-Measured on a 2 × 64-core Zen 4 host with a 32 GiB database, this takes a
-single-query online response from ~0.5 s (unstable) to a stable ~0.38 s.
-Batched throughput is much less sensitive — the migration churn amortizes
-over the batch.
+Measured on a 2 × 64-core Zen 4 host with a 32 GiB database (single query):
+~1.0 s online before any placement work; ~0.48 s with the built-in pinning
+and balancing left on; ~0.38 s with balancing also disabled. Batched
+throughput is much less sensitive — the churn amortizes over the batch
+(≈115 ms/query at batch 64 regardless).
 
 ## License
 

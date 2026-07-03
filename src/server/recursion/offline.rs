@@ -67,6 +67,21 @@ where
             resp1_precompute,
         });
 
+        // Pin the packing precomputes' NUMA policy (interleave, no page
+        // migration — the offline workers already spread them): the online
+        // pack streams these from freshly spawned worker threads on every
+        // node, and without an explicit VMA policy automatic NUMA balancing
+        // hint-faults and migrates their pages mid-query (measured: an
+        // unstable 50–250 ms added to `recursion.l1.pack` per query on a
+        // 2-socket host).
+        let started = Instant::now();
+        if let ServerPrecomputation::Recursion(off) = &self.precomputation {
+            for pre in off.l1_precompute.iter().chain(&off.resp1_precompute) {
+                pre.for_each_buffer(crate::numa::interleave);
+            }
+        }
+        timings.record_phase("recursion.numa_place", started.elapsed());
+
         // Warm the online per-worker scratch pool (plan M2′) so per-query packs
         // reuse it instead of allocating.
         let bytes = self.scratch_for_pack();

@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use poulpy_core::layouts::ModuleCoreAlloc;
 use poulpy_hal::layouts::{Backend, Module};
 
-use crate::{parallel::num_threads, payload::Payload};
+use crate::{numa, parallel::num_threads, payload::Payload};
 
 use super::{
     CoeffMatrix, address::Address, layout::DatabaseLayout,
@@ -43,87 +43,6 @@ fn first_touch_matrices(matrices: &mut [CoeffMatrix]) {
             });
         }
     });
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-mod numa {
-    use std::sync::OnceLock;
-
-    /// Bitmask of online NUMA nodes (bit `i` = node `i`); 0 when unknown,
-    /// single-node, or beyond 64 nodes (all "leave placement alone" cases).
-    fn online_nodes() -> u64 {
-        static MASK: OnceLock<u64> = OnceLock::new();
-        *MASK.get_or_init(|| {
-            let Ok(s) = std::fs::read_to_string("/sys/devices/system/node/online") else {
-                return 0;
-            };
-            let mut mask = 0u64;
-            for part in s.trim().split(',') {
-                let mut ends = part.splitn(2, '-');
-                let Some(Ok(lo)) = ends.next().map(str::parse::<u32>) else {
-                    return 0;
-                };
-                let hi = match ends.next().map(str::parse::<u32>) {
-                    Some(Ok(hi)) => hi,
-                    Some(Err(_)) => return 0,
-                    None => lo,
-                };
-                if hi >= 64 {
-                    return 0;
-                }
-                for n in lo..=hi {
-                    mask |= 1 << n;
-                }
-            }
-            if mask.count_ones() >= 2 { mask } else { 0 }
-        })
-    }
-
-    /// Apply `MPOL_INTERLEAVE` over all online nodes to the whole pages inside
-    /// `[ptr, ptr + len)`. Pages faulted afterwards are placed round-robin
-    /// across the nodes, and the explicit VMA policy exempts them from
-    /// automatic NUMA balancing. Best-effort: on any failure the pages simply
-    /// keep first-touch placement.
-    pub(super) fn interleave(ptr: *const u8, len: usize) {
-        let nodes = online_nodes();
-        if nodes == 0 {
-            return;
-        }
-        const PAGE: usize = 4096;
-        // Round inward: partial edge pages may be shared with neighboring heap
-        // allocations, so leave their policy untouched.
-        let start = (ptr as usize).next_multiple_of(PAGE);
-        let end = (ptr as usize + len) & !(PAGE - 1);
-        if end <= start {
-            return;
-        }
-        const SYS_MBIND: core::ffi::c_long = 237;
-        const MPOL_INTERLEAVE: usize = 3;
-        unsafe extern "C" {
-            fn syscall(num: core::ffi::c_long, ...) -> core::ffi::c_long;
-        }
-        let mask = [nodes];
-        // SAFETY: mbind only sets the placement policy of pages in our own
-        // address range; it reads `mask` (valid for the 64 node bits declared
-        // by `maxnode`) and never touches the memory contents.
-        unsafe {
-            syscall(
-                SYS_MBIND,
-                start,
-                end - start,
-                MPOL_INTERLEAVE,
-                mask.as_ptr(),
-                64usize,
-                0usize,
-            );
-        }
-    }
-}
-
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-mod numa {
-    /// No-op off Linux/x86-64: pages keep the round-robin first-touch spread.
-    pub(super) fn interleave(_ptr: *const u8, _len: usize) {}
 }
 
 /// The raw PIR database: `physical_rows · block_cols` `n x n` `i16`
