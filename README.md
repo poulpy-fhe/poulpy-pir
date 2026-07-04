@@ -70,15 +70,24 @@ with a 32 GiB database (batch 256):
   faults and migrations otherwise add an unstable 50–250 ms to per-query
   pack latency while the online workers stream them. This is neutral for
   batch throughput.
-- The database itself deliberately gets **no explicit placement**: batched
-  serving measures ~12% faster when automatic balancing is left free to
-  migrate the hot DB blocks adaptively than under any static policy tried
-  (blanket interleave, per-row-group node binding with pinned workers, or a
-  parallel first-touch spread). The trade-off is single-query latency: the
-  DB is first-touched onto the fill writer's node, so a lone query's
-  memory-bound body product runs at one node's bandwidth. Latency-focused
-  deployments can run under `numactl --interleave=all` (helps the online
-  phases, costs the offline GEMM ~15%).
+- Database placement is a **compile-time choice** via the
+  `numa-db-interleave` feature, because the two serving modes want opposite
+  policies:
+  - **Off (default) — batch throughput.** The DB gets no explicit placement:
+    batched serving measures ~12% faster when automatic balancing is left
+    free to migrate the hot DB blocks adaptively than under any static
+    policy tried (blanket interleave, per-row-group node binding with pinned
+    workers, or a parallel first-touch spread). The trade-off is
+    single-query latency: the DB is first-touched onto the fill writer's
+    node, so a lone query's memory-bound body product runs at one node's
+    bandwidth (~1.5 s instead of ~0.2 s online for a 32 GiB DB).
+  - **On (`--features numa-db-interleave`) — single-query latency.** The DB
+    pages are spread across the nodes with `mbind(MPOL_INTERLEAVE)` at
+    allocation and pre-faulted from parallel workers, so the body product
+    runs at every node's bandwidth and the pages are exempt from automatic
+    balancing. Prefer this over `numactl --interleave=all` when you can
+    rebuild: it scopes the policy to the DB, leaving the offline GEMM's
+    buffers unaffected (blanket `numactl` costs the offline GEMM ~15%).
 
 On a dedicated batch-serving host, also consider disabling automatic
 balancing entirely — it was worth another ~5–8% batch throughput in our

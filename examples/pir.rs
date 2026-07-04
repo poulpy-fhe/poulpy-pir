@@ -10,6 +10,11 @@
 //! cargo run --release --example pir -- interpolation   # InsPIRe  (U256P65535)
 //! cargo run --release --example pir -- recursion        # InsPIRe² (U256P65536)
 //! ```
+//!
+//! On a multi-socket (NUMA) host, pick the DB placement for the serving mode:
+//! the default build is tuned for batched throughput; add
+//! `--features numa-db-interleave` when optimizing single-query latency
+//! (interleaves the DB pages across nodes — see the README's NUMA section).
 
 use std::time::Instant;
 

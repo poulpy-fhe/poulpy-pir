@@ -13,6 +13,11 @@
 //!   cargo run --release --features avx512-fhe --example avx512_end_to_end -- InsPIRe-1GiB-c8192
 //! ```
 //!
+//! On a multi-socket (NUMA) host, pick the DB placement for the serving mode:
+//! the default build is tuned for batched throughput; add
+//! `--features numa-db-interleave` when optimizing single-query latency
+//! (interleaves the DB pages across nodes — see the README's NUMA section).
+//!
 //! Args: `<name> [item_index] [batch]`. `<name>` is a [`DefaultPirParameters32B`]
 //! name (default `InsPIRe-1GiB-c8192`); run with an unknown name to print the full
 //! list, or e.g. `InsPIRe-32GiB-c262144` / `InsPIRe2-g64-32GiB-c131072` for the
