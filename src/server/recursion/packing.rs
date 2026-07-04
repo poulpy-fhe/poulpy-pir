@@ -262,7 +262,18 @@ where
         )
     }
 
+    /// Pack-scratch arena size, cached on first use: a pure function of the
+    /// fixed parameters, but expensive to compute (`pack_precompute_tmp_bytes`
+    /// runs the backend's sizing planner over a probe layout, ~30-60 ms) — and
+    /// it is on the per-query online path twice (pool top-up + resp2 mask
+    /// precompute), where recomputing it dominated the untimed wall-clock gap.
     pub(super) fn scratch_for_pack(&self) -> usize {
+        *self
+            .pack_scratch_bytes
+            .get_or_init(|| self.compute_scratch_for_pack())
+    }
+
+    fn compute_scratch_for_pack(&self) -> usize {
         let params = &self.params;
         let module = params.module();
         let n = params.n();
