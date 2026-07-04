@@ -9,8 +9,8 @@
 //! Build/run on a host with AVX-512F (e.g. an AWS `c7i` instance):
 //!
 //! ```text
-//! RUSTFLAGS="-C target-feature=+avx512f" cargo run --release --features avx512-fhe --example avx512_end_to_end -- InsPIRe-1GiB-c8192
-//!   
+//! PIR_THREADS=1 RUSTFLAGS="-C target-feature=+avx512f,+avx512dq" cargo run --release --features "avx512-fhe, cblas-gemm" --example avx512_end_to_end -- InsPIRe2-g64-32GiB-c262144
+//! PIR_THREADS=1 RUSTFLAGS="-C target-feature=+avx512f,+avx512dq" cargo run --release --features "avx512-fhe, cblas-gemm, numa-db-interleave" --example avx512_end_to_end -- InsPIRe2-g64-32GiB-c262144  
 //! ```
 //!
 //! On a multi-socket (NUMA) host, pick the DB placement for the serving mode:
@@ -46,6 +46,24 @@ use poulpy_pir::{
 type BE = FFT64Avx512;
 
 fn main() {
+    // cblas-gemm: the pthread OpenBLAS spawns its worker pool in its ELF
+    // constructor — before main — sized from the constructor-time environment.
+    // An unsized pool (127 threads here) spin-waits through the whole run and
+    // measurably slows the non-BLAS phases (~2× on the single-threaded online
+    // path); the runtime `openblas_set_num_threads(1)` pin in `CblasDgemm`
+    // only stops dispatch, not the spawn. The env var must therefore be set
+    // before the library loads: re-exec once with it set if absent.
+    #[cfg(feature = "cblas-gemm")]
+    if std::env::var_os("OPENBLAS_NUM_THREADS").is_none() {
+        use std::os::unix::process::CommandExt;
+        let exe = std::env::current_exe().expect("current_exe for OpenBLAS re-exec");
+        let err = std::process::Command::new(exe)
+            .args(std::env::args_os().skip(1))
+            .env("OPENBLAS_NUM_THREADS", "1")
+            .exec();
+        panic!("re-exec with OPENBLAS_NUM_THREADS=1 failed: {err}");
+    }
+
     // Friendly guard: FFT64Avx512 requires AVX-512F and will otherwise fault.
     if !std::arch::is_x86_feature_detected!("avx512f") {
         eprintln!(
@@ -160,7 +178,15 @@ where
     // ---- SETUP: client and server instantiate from the shared config/layout. ----
     let timer = Instant::now();
     let mut client = Client::<BE, P>::new(config, layout);
+    #[allow(unused_mut)]
     let mut server = Server::<BE, P>::new(config, layout);
+    // With `cblas-gemm`, the offline mask product runs on the system BLAS dgemm
+    // instead of private-gemm-x86 (~1.5-1.7× on Granite Rapids; see Cargo.toml).
+    #[cfg(feature = "cblas-gemm")]
+    {
+        server = server.with_gemm(poulpy_pir::server::CblasDgemm);
+        println!("gemm backend                 : CblasDgemm (system BLAS)");
+    }
     let setup = timer.elapsed();
     println!("SETUP                        : {:?}", setup);
 

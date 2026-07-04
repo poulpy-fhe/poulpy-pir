@@ -25,6 +25,21 @@ poulpy-cpu-avx512 = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3
 # Build/run on an AVX-512F host with:
 #   RUSTFLAGS="-C target-feature=+avx512f" cargo run --release --features avx512-fhe --example avx512_end_to_end
 avx512-fhe = ["dep:poulpy-cpu-avx512"]
+# Expose `CblasDgemm`, a `Gemm` backend for the offline mask product backed by
+# the system CBLAS (`cblas_dgemm`). Links `libopenblas` — install the *pthread*
+# build (Ubuntu: `libopenblas-pthread-dev`) and run with
+# `OPENBLAS_NUM_THREADS=1` set in the environment (constructor-read: it must
+# be set before the process starts; the examples re-exec to enforce it). The
+# server fans dgemm out across its own workers, and only the pthread build's
+# buffer pool is locked for concurrent callers (Debian's "serial" build
+# corrupts results under concurrent use — measured); the env var keeps that
+# build from spawning its 1-per-CPU spin-waiting pool, which otherwise slows
+# even non-BLAS phases (~2x on the single-threaded online path — measured).
+# build.rs probes the distro's off-path pthread directories, or set
+# `CBLAS_LIB_DIR` / `CBLAS_LIB_NAME` explicitly. Motivation: on wide-AVX-512
+# cores (Granite Rapids c8i: 3×512-bit FMA pipes) OpenBLAS's dgemm sustains
+# ~1.5-1.7× private-gemm-x86's throughput at the 2048³ PIR shape.
+cblas-gemm = []
 # Pin the database pages across NUMA nodes with mbind(MPOL_INTERLEAVE) at
 # allocation (Linux/x86-64). Choose per deployment: single-query latency on
 # multi-socket hosts improves ~7x (memory-bound l1 body product runs at every

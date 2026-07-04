@@ -48,6 +48,8 @@ mod oep;
 mod recursion;
 
 use api::{InterpolationServerModule, RecursionServerModule};
+#[cfg(feature = "cblas-gemm")]
+pub use gemm::CblasDgemm;
 pub use gemm::{Gemm, PrivateGemmX86};
 pub use interpolation::InterpolationPrecomputation;
 use interpolation::InterpolationState;

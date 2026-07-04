@@ -58,6 +58,45 @@ cargo run --release --example pir
 
 The example fixes the backend to the AVX2/FMA-accelerated `FFT64Avx` (`type BE = FFT64Avx`). The crate is generic over the backend, so for a portable, dependency-free build you can swap that alias for the scalar reference backend `poulpy_cpu_ref::FFT64Ref` — at a performance cost.
 
+## Faster offline GEMM on wide-AVX-512 hosts (`cblas-gemm`)
+
+The offline mask product (`sum U·A`, the dominant `O(N·d)` phase) runs on a
+pluggable dense-`f64` kernel behind the `server::Gemm` trait, defaulting to
+`private-gemm-x86`. On CPUs with more FMA width than that kernel exploits —
+notably Intel Granite Rapids (AWS `c8i`), whose cores carry **three** 512-bit
+FMA pipes — the system OpenBLAS is measurably faster at the PIR shape. The
+`cblas-gemm` feature exposes `server::CblasDgemm` and wires it into the
+`avx512_end_to_end` example:
+
+```sh
+sudo apt-get install libopenblas-pthread-dev  # pthread build, NOT -serial (see below)
+RUSTFLAGS="-C target-feature=+avx512f,+avx512dq" \
+  cargo run --release --features avx512-fhe,cblas-gemm --example avx512_end_to_end -- InsPIRe2-g64-32GiB-c262144
+```
+
+Measured on `c8i.32xlarge` (64 Granite Rapids cores / 128 SMT threads,
+32 GiB DB, `InsPIRe2-g64-32GiB-c262144`): `recursion.l1.mask_product` drops
+from 23.4 s to **19.8 s**, matching a 128-physical-core `c7a.32xlarge`. On
+AMD hosts (`c7a`) the two kernels are close — measure before switching.
+Keep the default 1-worker-per-logical-CPU fan-out: the SMT siblings hide the
+panel-widening memory stalls (capping `PIR_THREADS` at 64 or 96 measures
+*slower* end-to-end despite higher synthetic per-call GEMM throughput).
+
+Install the **pthread** OpenBLAS variant: the server issues dgemm from many
+of its own workers concurrently, and Debian/Ubuntu's `-serial` build has no
+locking on its internal buffer pool — under concurrent callers it silently
+corrupts results (measured). Additionally, **run with
+`OPENBLAS_NUM_THREADS=1` in the environment**: the pthread build spawns its
+worker pool in its ELF constructor (before `main`), and an unsized pool of
+128 spin-waiting threads slows even the non-BLAS phases (~2× on the
+single-threaded online path, measured) — `CblasDgemm`'s runtime pin stops
+dispatch to the pool but cannot un-spawn it. The bundled examples enforce
+this by re-exec'ing once with the variable set when it is absent, so
+`cargo run` just works; standalone integrations must set it themselves.
+Point `CBLAS_LIB_DIR`/`CBLAS_LIB_NAME` at another CBLAS (it must be
+concurrent-caller-safe and single-threaded per call) to swap libraries
+without touching code.
+
 ## Tuning multi-socket (NUMA) hosts
 
 The server is tuned with **batched throughput as the priority**. Two
