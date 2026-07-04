@@ -36,6 +36,11 @@ numa-db-interleave = []
 [[example]]
 name = "avx512_end_to_end"
 path = "examples/avx512_end_to_end.rs"
+#required-features = ["avx512-fhe"]
+
+[[example]]
+name = "pir"
+path = "examples/pir.rs"
 required-features = ["avx512-fhe"]
 
 [[bench]]

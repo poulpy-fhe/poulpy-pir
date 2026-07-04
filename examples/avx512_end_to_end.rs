@@ -9,8 +9,8 @@
 //! Build/run on a host with AVX-512F (e.g. an AWS `c7i` instance):
 //!
 //! ```text
-//! RUSTFLAGS="-C target-feature=+avx512f" \
-//!   cargo run --release --features avx512-fhe --example avx512_end_to_end -- InsPIRe-1GiB-c8192
+//! RUSTFLAGS="-C target-feature=+avx512f" cargo run --release --features avx512-fhe --example avx512_end_to_end -- InsPIRe-1GiB-c8192
+//!   
 //! ```
 //!
 //! On a multi-socket (NUMA) host, pick the DB placement for the serving mode:
@@ -25,9 +25,12 @@
 //! capacity. `batch` (default 1) additionally answers that many queries at once
 //! via `respond_batch` and reports batched throughput. `poulpy-cpu-avx512`
 //! enforces AVX-512F at compile time, so this only *builds* on an AVX-512F host.
+//!
+//! \cargo run --release --example avx512_end_to_end InsPIRe2-g64-32GiB-c262144 10000 512
 
 use std::time::Instant;
 
+//use poulpy_cpu_avx::FFT64Avx;
 use poulpy_cpu_avx512::FFT64Avx512;
 use poulpy_pir::{
     client::Client,
@@ -39,6 +42,7 @@ use poulpy_pir::{
 
 /// The concrete backend under test. This alias — in a binary, not the library —
 /// is the one and only place the AVX-512 backend is named.
+//type BE = FFT64Avx;
 type BE = FFT64Avx512;
 
 fn main() {
