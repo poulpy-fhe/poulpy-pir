@@ -263,11 +263,46 @@ fn full_torus_f64_mask_product<BE>(
     encode_torus_mask_f64::<BE>(out, &acc, rows_out, lwe_n, torus_bits);
 }
 
+/// Which axis [`mask_product_acc`] splits across its `mask_threads` workers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaskSplit {
+    /// Split the dst *columns* into contiguous strips (the default): every
+    /// output element is a single full-depth ascending-`bc` fold owned by one
+    /// thread, so the result is independent of `nt` (bit-identical to the
+    /// sequential fold on width-independent kernels).
+    Cols,
+    /// Split the `bc` *blocks* into contiguous ranges ("one matrix per
+    /// thread"): each worker contracts whole panels at full dst width, and the
+    /// per-range partials are reduced in ascending order. Faster — full-width
+    /// GEMMs (a 512-wide strip costs ~14% kernel throughput at PIR shape),
+    /// each panel is widened once per group instead of once per strip thread,
+    /// and no rhs strip copies — but the summation *grouping* now depends on
+    /// `nt`, so results vary by a few ulps across thread counts (the same
+    /// cryptographic-equivalence class as swapping the GEMM kernel; far below
+    /// the torus rounding margin and FHE noise floor).
+    Blocks,
+}
+
+/// Runtime selection: `PIR_MASK_SPLIT=blocks|cols` (default `cols`, the
+/// bit-exact status quo). Read once — the choice must not change mid-run.
+fn mask_split() -> MaskSplit {
+    static SPLIT: std::sync::OnceLock<MaskSplit> = std::sync::OnceLock::new();
+    *SPLIT.get_or_init(|| {
+        match std::env::var("PIR_MASK_SPLIT").as_deref() {
+            Ok("blocks") => MaskSplit::Blocks,
+            _ => MaskSplit::Cols,
+        }
+    })
+}
+
 /// The pure-`f64` mask accumulation `sum_bc U_bc · A_bc`, optionally split
 /// across `mask_threads` threads. `mask_threads <= 1` is the exact sequential
-/// left-fold (reference order). For `nt > 1` the dst *columns* are split into
-/// `nt` contiguous strips; each worker runs the full ascending-`bc` contraction
-/// for its own strip. Every output element is a single full-depth dot product
+/// left-fold (reference order). For `nt > 1` the split axis is chosen by
+/// [`mask_split`]: dst-column strips (default; `nt`-independent results) or
+/// `bc` block ranges (faster; see [`MaskSplit`] for the trade-off).
+///
+/// Column strips: each worker runs the full ascending-`bc` contraction for its
+/// own strip. Every output element is a single full-depth dot product
 /// accumulated in the reference block order by exactly one thread — no partial
 /// accumulators, no cross-thread reduction — so unlike a `bc`-range split the
 /// result does not depend on `nt` (measured bit-identical to the sequential
@@ -286,6 +321,44 @@ fn mask_product_acc(
     if nt <= 1 {
         let mut acc = vec![0.0f64; rows_out * lwe_n];
         accumulate_mask_range(&mut acc, prepared, masks, rows_out, lwe_n, 0..k, gemm);
+        return acc;
+    }
+
+    if mask_split() == MaskSplit::Blocks && k >= 2 {
+        // One matrix per thread: contiguous `bc` ranges, each contracted at
+        // full dst width into its own partial (via the same sequential
+        // building block), then reduced in ascending range order.
+        let ntk = nt.min(k);
+        let base = k / ntk;
+        let rem = k % ntk;
+        let mut ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(ntk);
+        let mut start = 0;
+        for i in 0..ntk {
+            let len = base + usize::from(i < rem);
+            ranges.push(start..start + len);
+            start += len;
+        }
+        let mut partials: Vec<Vec<f64>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = ranges
+                .into_iter()
+                .map(|range| {
+                    scope.spawn(move || {
+                        let mut part = vec![0.0f64; rows_out * lwe_n];
+                        accumulate_mask_range(
+                            &mut part, prepared, masks, rows_out, lwe_n, range, gemm,
+                        );
+                        part
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let mut acc = std::mem::take(&mut partials[0]);
+        for part in &partials[1..] {
+            for (a, p) in acc.iter_mut().zip(part.iter()) {
+                *a += *p;
+            }
+        }
         return acc;
     }
 
