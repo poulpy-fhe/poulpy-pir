@@ -22,7 +22,7 @@ use crate::{
     config::Collapse,
     database::DatabaseLayout,
     packing::{Packing, PackingMaskAggregation, recursion::qtilde_glwe_layout},
-    parallel::{assign_panels, num_threads, scoped_workers},
+    parallel::{assign_panels, num_threads_setup, scoped_workers},
     parameters::Parameters,
     payload::Payload,
     server::{
@@ -206,7 +206,7 @@ where
         // Each block's PRG stream is domain-separated through `block_seed`, so
         // blocks expand independently and by-index writes keep the CRS
         // bit-identical across thread counts.
-        let work = assign_panels(blocks, 1, num_threads(blocks));
+        let work = assign_panels(blocks, 1, num_threads_setup(blocks));
         let mut outputs: Vec<Option<QueryMask>> = (0..blocks).map(|_| None).collect();
         {
             let dst_infos = &dst_infos;

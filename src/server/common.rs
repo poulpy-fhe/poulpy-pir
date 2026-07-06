@@ -611,6 +611,110 @@ fn encode_torus_mask_f64<BE>(
     }
 }
 
+/// Parallel level-1 body accumulator over the whole DB. For each physical row
+/// group `rg`, returns `acc[rg]` (row-major `rows_out × q`, query fastest) equal
+/// to `Σ_bc U(rg,bc) · b_bc` for the query batch — the same quantity
+/// [`full_torus_f64_body_product_batch`] computes per group, but:
+///
+/// * the shared query RHS (`bodies_per_query`, identical for every row group) is
+///   decoded **once** instead of once per group, and
+/// * the work is parallelized across `(row_group, output-row band)` tiles, so all
+///   `nthreads` cores are used even when the row-group count is below the thread
+///   count (the online first dimension's dominant `D·b0`).
+///
+/// Output rows are independent GEMV rows, so the band split needs no partial-sum
+/// reduction and the result is bit-identical to the serial per-group order. When
+/// `nthreads <= physical_rows` each group is a single tile (the original
+/// whole-panel GEMM). The caller encodes/​splits each returned `acc[rg]`.
+#[allow(clippy::type_complexity)]
+pub(super) fn body_product_acc_parallel(
+    db_views: &[Vec<PreparedF64>],
+    bodies_per_query: &[&[GLWECompressed<Vec<u8>>]],
+    body_base2k: usize,
+    torus_bits: usize,
+    nthreads: usize,
+    gemm: &dyn Gemm,
+) -> Vec<Vec<f64>> {
+    let physical_rows = db_views.len();
+    assert!(physical_rows > 0, "cannot accumulate an empty DB");
+    let nblocks = db_views[0].len();
+    let q = bodies_per_query.len();
+    assert!(q > 0, "cannot run an empty body-product batch");
+    for bodies in bodies_per_query {
+        assert_eq!(bodies.len(), nblocks, "per-query block count differs");
+    }
+    let rows_out = db_views[0][0].rows_out;
+
+    // Decode the query bodies once; `rhs_all[bc]` is row-major `rows_in × q`
+    // (query fastest), the layout `gemm_i16_f64_add` contracts against. Shared
+    // read-only across every row group and every output-row band below.
+    let mut rhs_all: Vec<Vec<f64>> = Vec::with_capacity(nblocks);
+    {
+        let mut tmp: Vec<i64> = Vec::new();
+        for bc in 0..nblocks {
+            let rows_in = db_views[0][bc].rows_in;
+            let mut rhs = vec![0.0f64; rows_in * q];
+            for (qi, bodies) in bodies_per_query.iter().enumerate() {
+                decode_torus_body_into_col(
+                    &mut rhs,
+                    qi,
+                    q,
+                    bodies[bc].data(),
+                    rows_in,
+                    body_base2k,
+                    torus_bits,
+                    &mut tmp,
+                );
+            }
+            rhs_all.push(rhs);
+        }
+    }
+
+    // One accumulator per row group; the tiles below borrow disjoint output-row
+    // bands of these buffers, so their writes never alias across threads.
+    let mut acc_all: Vec<Vec<f64>> = (0..physical_rows)
+        .map(|_| vec![0.0f64; rows_out * q])
+        .collect();
+
+    // Split each group's `rows_out` into `tiles_per_group` bands so the total tile
+    // count reaches `nthreads` even with few row groups.
+    let tiles_per_group = nthreads.div_ceil(physical_rows).max(1);
+    let band = rows_out.div_ceil(tiles_per_group).max(1);
+    let mut tiles: Vec<(usize, usize, &mut [f64])> = Vec::new();
+    for (rg, acc) in acc_all.iter_mut().enumerate() {
+        let mut r0 = 0;
+        let mut rest = acc.as_mut_slice();
+        while r0 < rows_out {
+            let len = band.min(rows_out - r0);
+            let (head, tail) = rest.split_at_mut(len * q);
+            tiles.push((rg, r0, head));
+            rest = tail;
+            r0 += len;
+        }
+    }
+
+    let rhs_all = &rhs_all;
+    let chunk = tiles.len().div_ceil(nthreads.max(1)).max(1);
+    std::thread::scope(|scope| {
+        for group in tiles.chunks_mut(chunk) {
+            scope.spawn(move || {
+                for tile in group.iter_mut() {
+                    let (rg, r0) = (tile.0, tile.1);
+                    let rows_band = tile.2.len() / q;
+                    for bc in 0..nblocks {
+                        let u = &db_views[rg][bc];
+                        let rin = u.rows_in;
+                        let u_band = &u.values[r0 * rin..(r0 + rows_band) * rin];
+                        gemm.gemm_i16_f64_add(&mut *tile.2, u_band, &rhs_all[bc], rows_band, rin, q);
+                    }
+                }
+            });
+        }
+    });
+
+    acc_all
+}
+
 /// Decodes the single body column (`col 0`) of `body` into `out[0..rows]` as real
 /// torus values in `[-0.5, 0.5)`.
 fn decode_torus_body_f64(
@@ -630,7 +734,7 @@ fn decode_torus_body_f64(
 
 /// Encodes the `rows`-long real body accumulator into `out`'s column 0 at
 /// `out_base2k`; coefficients beyond `rows` (up to the ring degree) are zeroed.
-fn encode_torus_body_f64<BE>(
+pub(super) fn encode_torus_body_f64<BE>(
     out: &mut VecZnx<BE::OwnedBuf>,
     out_base2k: usize,
     acc: &[f64],

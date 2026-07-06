@@ -69,23 +69,70 @@ pub(crate) struct BlockWork {
     pub col_len: usize,
 }
 
-/// Resolve the worker count: `PIR_THREADS` (if set and `>= 1`) overrides the
-/// detected core count, then the result is clamped to `1..=cap`. `cap` is the
-/// natural parallelism ceiling at the call site (e.g. the number of panels).
+/// Parse a positive worker count from environment variable `var`.
+fn env_threads(var: &str) -> Option<usize> {
+    std::env::var(var)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&t| t >= 1)
+}
+
+/// The base worker budget: `PIR_THREADS` (if set and `>= 1`) overrides the
+/// detected logical-CPU count. Phase-specific budgets layer over this.
+fn base_threads() -> usize {
+    env_threads("PIR_THREADS").unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|x| x.get())
+            .unwrap_or(1)
+    })
+}
+
+/// Resolve the base worker count (setup / database fill), clamped to `1..=cap`.
+/// `cap` is the natural parallelism ceiling at the call site (e.g. the number of
+/// panels). See [`num_threads_online`] / [`num_threads_offline`] for the phase
+/// budgets that let the online and offline paths be tuned independently.
 pub(crate) fn num_threads(cap: usize) -> usize {
     if cap <= 1 {
         return 1;
     }
-    let detected = std::env::var("PIR_THREADS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&t| t >= 1)
-        .unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|x| x.get())
-                .unwrap_or(1)
-        });
-    detected.clamp(1, cap)
+    base_threads().clamp(1, cap)
+}
+
+/// Worker count for the **online** response path: `PIR_ONLINE_THREADS` overrides
+/// [`base_threads`] (which itself is `PIR_THREADS` or the CPU count). Lets the
+/// memory-bound online DB×body product be tuned separately from the offline
+/// (compute-bound) preprocessing.
+pub(crate) fn num_threads_online(cap: usize) -> usize {
+    if cap <= 1 {
+        return 1;
+    }
+    env_threads("PIR_ONLINE_THREADS")
+        .unwrap_or_else(base_threads)
+        .clamp(1, cap)
+}
+
+/// Worker count for the **offline** preprocessing path: `PIR_OFFLINE_THREADS`
+/// overrides [`base_threads`].
+pub(crate) fn num_threads_offline(cap: usize) -> usize {
+    if cap <= 1 {
+        return 1;
+    }
+    env_threads("PIR_OFFLINE_THREADS")
+        .unwrap_or_else(base_threads)
+        .clamp(1, cap)
+}
+
+/// Worker count for one-time **setup** (database allocation / first-touch, query
+/// mask materialization): `PIR_SETUP_THREADS` overrides [`base_threads`].
+/// Independent of the online/offline budgets so setup always runs at full width
+/// regardless of how those experiment knobs are set.
+pub(crate) fn num_threads_setup(cap: usize) -> usize {
+    if cap <= 1 {
+        return 1;
+    }
+    env_threads("PIR_SETUP_THREADS")
+        .unwrap_or_else(base_threads)
+        .clamp(1, cap)
 }
 
 /// Panel-major assignment: distribute the `p` panels across `threads` workers as

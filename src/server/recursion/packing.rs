@@ -28,7 +28,7 @@ use crate::{
         Packing, PackingKeys, PackingMaskAggregation, PackingPrecomputations,
         recursion::partial_pack_batch_pooled,
     },
-    parallel::{assign_panels, num_threads, scoped_workers},
+    parallel::{assign_panels, num_threads_offline, scoped_workers},
     payload::Payload,
     server::{
         Gemm, OfflineTimings, OnlineTimings, Server,
@@ -75,7 +75,7 @@ where
             gamma,
             key_mask_source,
             key_stride,
-            num_threads(usize::MAX),
+            num_threads_offline(usize::MAX),
         );
         timings.add_prepare_u(phase_names.prepare_db, durations.prepare_db);
         timings.add_ua_mask(phase_names.mask_product, durations.mask_product);
@@ -146,7 +146,7 @@ where
         };
         let size = res_infos.size();
         let bytes = self.scratch_for_pack();
-        let nthreads = num_threads(nbatches).min(max_threads.max(1));
+        let nthreads = num_threads_offline(nbatches).min(max_threads.max(1));
         // Spare cores tile each batch's mask-product contraction (balanced
         // nesting with the across-batch parallelism). `max_threads = 1` (online)
         // makes everything sequential — one scratch alloc, no spawn overhead.

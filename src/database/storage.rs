@@ -5,7 +5,7 @@ use poulpy_hal::layouts::{Backend, Module};
 
 use crate::payload::Payload;
 #[cfg(feature = "numa-db-interleave")]
-use crate::{numa, parallel::num_threads};
+use crate::{numa, parallel::num_threads_setup};
 
 use super::{
     CoeffMatrix, address::Address, layout::DatabaseLayout,
@@ -43,19 +43,29 @@ use super::{
 /// granularity (and the pre-fault alone takes ~12 s off the 32 GiB fill).
 #[cfg(feature = "numa-db-interleave")]
 fn first_touch_matrices(matrices: &mut [CoeffMatrix]) {
-    let nthreads = num_threads(matrices.len());
+    // Two passes, because `mbind` and the page fault scale differently:
+    //
+    // 1. `numa::interleave` (`mbind`) takes the process `mmap_lock` in *write*
+    //    mode, so issuing it from many threads only forms a lock convoy — it is
+    //    no faster in parallel and the contention dominates (a single-threaded
+    //    ~4 s SETUP on a 32 GiB DB). Set the interleave policy serially.
+    // 2. The actual first-touch faults each take only a per-page-table lock, so
+    //    they parallelize across cores — do those at full setup width.
+    for m in matrices.iter() {
+        numa::interleave(m.flat().as_ptr().cast(), size_of_val(m.flat()));
+    }
+    let nthreads = num_threads_setup(matrices.len());
     if nthreads <= 1 {
+        for m in matrices.iter_mut() {
+            m.first_touch();
+        }
         return;
     }
-    let mut buckets: Vec<Vec<&mut CoeffMatrix>> = (0..nthreads).map(|_| Vec::new()).collect();
-    for (i, m) in matrices.iter_mut().enumerate() {
-        buckets[i % nthreads].push(m);
-    }
+    let per = matrices.len().div_ceil(nthreads);
     std::thread::scope(|scope| {
-        for bucket in buckets {
+        for chunk in matrices.chunks_mut(per) {
             scope.spawn(move || {
-                for m in bucket {
-                    numa::interleave(m.flat().as_ptr().cast(), size_of_val(m.flat()));
+                for m in chunk {
                     m.first_touch();
                 }
             });
@@ -309,6 +319,11 @@ where
 
     /// Encode `payloads` values starting at payload index `start`, each as
     /// `P::EXPONENT` base-`P::BASIS` digits down consecutive rows of one column.
+    ///
+    /// The scatter is parallelized over the physical `n x n` matrices the shard
+    /// touches: every payload maps to exactly one matrix, so partitioning by
+    /// matrix hands each worker a disjoint set of matrices whose coefficient
+    /// writes never alias. The result is identical to a sequential scatter.
     pub fn encode_shard(&mut self, start: usize, payloads: &[[u8; 32]]) {
         let capacity = self.payload_capacity();
         let end = start
@@ -318,18 +333,71 @@ where
             end <= capacity,
             "shard writes past the configured capacity ({capacity})"
         );
-        let digits_per = P::EXPONENT;
-        let mut digits = vec![0i16; digits_per];
-        for (i, &payload) in payloads.iter().enumerate() {
-            let addr = self.payload_address(start + i);
-            let (matrix_idx, row_out_base, col_in_block) =
-                self.matrix_index_and_column(addr.matrix, addr.column);
-            let sub = &mut self.matrices[matrix_idx];
-            P::encode(&mut digits, payload);
-            for (k, &d) in digits.iter().enumerate() {
-                sub.row_mut(row_out_base + addr.row_offset + k)[col_in_block] = d;
-            }
+        if payloads.is_empty() {
+            return;
         }
+
+        let n = self.n;
+        let cols = self.cols;
+        let grid_rows = self.grid_rows;
+        let column_blocks = self.column_blocks();
+        let column_height = self.column_height();
+        let rows_per_group = self.rows_per_physical_group();
+        let payloads_per_column = self.preprocessing.payloads_per_column::<P>();
+        let payloads_per_grid_row = payloads_per_column * cols;
+        let digits_per = P::EXPONENT;
+
+        // The shard spans grid rows `[gr_lo, gr_hi]`, hence physical row groups
+        // `[rg_lo, rg_hi]` and the contiguous matrix range `[m_lo, m_hi)`. Only
+        // these matrices can receive a write, so workers scan just this window.
+        let gr_lo = start / payloads_per_grid_row;
+        let gr_hi = (end - 1) / payloads_per_grid_row;
+        let m_lo = (gr_lo / rows_per_group) * column_blocks;
+        let m_hi = (((gr_hi / rows_per_group) + 1) * column_blocks).min(self.matrices.len());
+        let count = m_hi - m_lo;
+        let workers = crate::parallel::num_threads(count);
+        let per = count.div_ceil(workers);
+
+        let slice = &mut self.matrices[m_lo..m_hi];
+        std::thread::scope(|scope| {
+            for (chunk_idx, chunk) in slice.chunks_mut(per).enumerate() {
+                let base_m = m_lo + chunk_idx * per;
+                scope.spawn(move || {
+                    let mut digits = vec![0i16; digits_per];
+                    for (local, matrix) in chunk.iter_mut().enumerate() {
+                        let m = base_m + local;
+                        let row_group = m / column_blocks;
+                        let block = m % column_blocks;
+                        // Valid columns in this (possibly narrower last) block.
+                        let width = (cols - block * n).min(n);
+                        for local_row in 0..rows_per_group {
+                            let grid_row = row_group * rows_per_group + local_row;
+                            if grid_row >= grid_rows {
+                                break; // partial last physical group
+                            }
+                            let row_base = local_row * column_height;
+                            for pic in 0..payloads_per_column {
+                                // Payload index of column c = 0 in this row run.
+                                let base = grid_row * payloads_per_grid_row + pic * cols + block * n;
+                                // In-range column sub-interval within `[0, width)`.
+                                let c_lo = start.saturating_sub(base).min(width);
+                                let c_hi = end.saturating_sub(base).min(width);
+                                if c_lo >= c_hi {
+                                    continue;
+                                }
+                                let row_off = row_base + pic * digits_per;
+                                for c in c_lo..c_hi {
+                                    P::encode(&mut digits, payloads[(base + c) - start]);
+                                    for (k, &d) in digits.iter().enumerate() {
+                                        matrix.row_mut(row_off + k)[c] = d;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
     }
 }
 

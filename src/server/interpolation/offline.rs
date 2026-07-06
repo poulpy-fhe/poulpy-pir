@@ -21,7 +21,7 @@ use crate::{
         Packing, PackingKeysGenerate, PackingMaskAggregation, PackingPrecomputations,
         PackingPrecomputeInfos,
     },
-    parallel::{assign_panels, num_threads, scoped_workers},
+    parallel::{assign_panels, num_threads_offline, scoped_workers},
     payload::Payload,
     server::{
         Gemm, OfflineTimings, Server, ServerCollapse, ServerPrecomputation,
@@ -78,7 +78,7 @@ where
             ServerCollapse::Interpolation(state) => state.interpolation.num_panels(),
             ServerCollapse::Recursion(_) => unreachable!(),
         };
-        let nthreads = num_threads(panels);
+        let nthreads = num_threads_offline(panels);
         while self.scratch_pool.len() < nthreads {
             self.scratch_pool
                 .push(ScratchOwned::<BE>::alloc(server_scratch_bytes(
@@ -184,14 +184,14 @@ where
             .collect();
 
         let k = self.layout.block_cols(self.params.n());
-        let nthreads = num_threads(panels);
+        let nthreads = num_threads_offline(panels);
         let work = assign_panels(panels, k, nthreads);
         let bytes = server_scratch_bytes(&self.params);
         // M3 block-tiling: when panels under-fill the machine (P < cores), give
         // each panel's mask-product GEMM the spare cores to tile its K-way
         // contraction. `mask_threads = 1` (incl. PIR_THREADS=1) keeps the exact
         // sequential fold. Nesting is safe: the mask product is scratch-free.
-        let mask_threads = (num_threads(usize::MAX) / nthreads).max(1);
+        let mask_threads = (num_threads_offline(usize::MAX) / nthreads).max(1);
         // P-free scalars captured by the worker closure (avoids capturing
         // `&Parameters<_, _, P>`, whose `PhantomData<P>` would force `P: Sync`).
         let n = self.params.n();

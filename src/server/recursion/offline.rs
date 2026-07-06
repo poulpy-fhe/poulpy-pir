@@ -24,7 +24,7 @@ use crate::{
         Packing, PackingMaskAggregation, PackingPrecomputations,
         recursion::{modulus_switch_to_digits, qtilde_glwe_layout},
     },
-    parallel::{assign_panels, num_threads, scoped_workers},
+    parallel::{assign_panels, num_threads_offline, scoped_workers},
     payload::Payload,
     server::{
         Gemm, OfflineTimings, Server, ServerCollapse, ServerPrecomputation,
@@ -85,7 +85,7 @@ where
         // Warm the online per-worker scratch pool (plan M2′) so per-query packs
         // reuse it instead of allocating.
         let bytes = self.scratch_for_pack();
-        let nthreads = num_threads(usize::MAX);
+        let nthreads = num_threads_offline(usize::MAX);
         while self.scratch_pool.len() < nthreads {
             self.scratch_pool.push(ScratchOwned::<BE>::alloc(bytes));
         }
@@ -166,10 +166,10 @@ where
         // partial mask-prep / pack-precompute. Each row group is independent
         // (own scratch, sequential per-batch ops ⇒ bit-identical).
         let bytes = self.scratch_for_pack();
-        let nthreads = num_threads(physical_rows);
+        let nthreads = num_threads_offline(physical_rows);
         // Spare cores tile each row group's mask-product contraction (balanced
         // nesting with the row-group parallelism, like the interpolation path).
-        let mask_threads = (num_threads(usize::MAX) / nthreads).max(1);
+        let mask_threads = (num_threads_offline(usize::MAX) / nthreads).max(1);
         let work = assign_panels(physical_rows, 1, nthreads);
         type GroupOut<BE> = (Option<Vec<PackingPrecomputations<BE>>>, [Duration; 3]);
         let mut outputs: Vec<GroupOut<BE>> = (0..physical_rows)

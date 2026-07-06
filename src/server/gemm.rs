@@ -392,40 +392,63 @@ unsafe fn gemv_i16_f64_add_avx512(
 ) {
     use std::arch::x86_64::*;
     let bp = b.as_ptr();
-    for i in 0..rows_out {
-        let row = unsafe { u.as_ptr().add(i * rows_in) };
-        let mut acc0 = _mm512_setzero_pd();
-        let mut acc1 = _mm512_setzero_pd();
+    let up = u.as_ptr();
+    let accp = acc.as_mut_ptr();
+
+    // 8-output-row register blocking: read 8 DB rows concurrently so the core has
+    // 8 in-flight sequential streams instead of 1. This GEMV is memory-level-
+    // parallelism-bound (one stream underfeeds the ~10 line-fill buffers), so the
+    // extra streams recover ~1.5× of single-core DRAM bandwidth (measured); the 8
+    // independent `f64` accumulators also hide FMA latency. Each `b[j]` is loaded
+    // once and reused across the 8 rows.
+    let mut i = 0;
+    while i + 8 <= rows_out {
+        let rows: [*const i16; 8] = std::array::from_fn(|k| unsafe { up.add((i + k) * rows_in) });
+        let mut a = [_mm512_setzero_pd(); 8];
         let mut j = 0;
-        while j + 16 <= rows_in {
-            // 16 × i16 → two halves of 8 × i32 (sign-extended).
-            let v16 = unsafe { _mm256_loadu_si256(row.add(j).cast::<__m256i>()) };
-            let lo32 = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(v16));
-            let hi32 = _mm256_cvtepi16_epi32(_mm256_extracti128_si256::<1>(v16));
-            // → two lanes of 8 × f64.
-            let lo = _mm512_cvtepi32_pd(lo32);
-            let hi = _mm512_cvtepi32_pd(hi32);
-            let b0 = unsafe { _mm512_loadu_pd(bp.add(j)) };
-            let b1 = unsafe { _mm512_loadu_pd(bp.add(j + 8)) };
-            acc0 = _mm512_fmadd_pd(lo, b0, acc0);
-            acc1 = _mm512_fmadd_pd(hi, b1, acc1);
-            j += 16;
-        }
-        // 8-wide cleanup (covers the common `rows_in % 16 == 8` case).
-        if j + 8 <= rows_in {
-            let v8 = unsafe { _mm_loadu_si128(row.add(j).cast::<__m128i>()) };
-            let f = _mm512_cvtepi32_pd(_mm256_cvtepi16_epi32(v8));
+        while j + 8 <= rows_in {
             let bv = unsafe { _mm512_loadu_pd(bp.add(j)) };
-            acc0 = _mm512_fmadd_pd(f, bv, acc0);
+            for k in 0..8 {
+                // 8 × i16 → 8 × i32 (sign-extended) → 8 × f64.
+                let v = unsafe { _mm_loadu_si128(rows[k].add(j).cast::<__m128i>()) };
+                let f = _mm512_cvtepi32_pd(_mm256_cvtepi16_epi32(v));
+                a[k] = _mm512_fmadd_pd(f, bv, a[k]);
+            }
             j += 8;
         }
-        let mut s = _mm512_reduce_add_pd(_mm512_add_pd(acc0, acc1));
-        // Scalar tail.
+        let mut s: [f64; 8] = std::array::from_fn(|k| _mm512_reduce_add_pd(a[k]));
+        // Scalar tail (`rows_in % 8`).
+        while j < rows_in {
+            let bj = unsafe { *bp.add(j) };
+            for k in 0..8 {
+                s[k] += unsafe { *rows[k].add(j) as f64 * bj };
+            }
+            j += 1;
+        }
+        for k in 0..8 {
+            unsafe { *accp.add(i + k) += s[k] };
+        }
+        i += 8;
+    }
+
+    // Remainder rows (`rows_out % 8`): one stream at a time.
+    while i < rows_out {
+        let row = unsafe { up.add(i * rows_in) };
+        let mut acc0 = _mm512_setzero_pd();
+        let mut j = 0;
+        while j + 8 <= rows_in {
+            let v = unsafe { _mm_loadu_si128(row.add(j).cast::<__m128i>()) };
+            let f = _mm512_cvtepi32_pd(_mm256_cvtepi16_epi32(v));
+            acc0 = _mm512_fmadd_pd(f, unsafe { _mm512_loadu_pd(bp.add(j)) }, acc0);
+            j += 8;
+        }
+        let mut s = _mm512_reduce_add_pd(acc0);
         while j < rows_in {
             s += unsafe { *row.add(j) as f64 * *bp.add(j) };
             j += 1;
         }
-        unsafe { *acc.as_mut_ptr().add(i) += s };
+        unsafe { *accp.add(i) += s };
+        i += 1;
     }
 }
 

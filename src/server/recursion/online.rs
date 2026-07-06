@@ -16,12 +16,12 @@ use crate::{
     client::{RecursionResponse, Response},
     config::Collapse,
     packing::{Packing, recursion::partial_pack_batch_pooled},
-    parallel::{assign_panels, num_threads},
+    parallel::num_threads_online,
     payload::Payload,
     server::{
         Gemm, OnlineTimings, Server, ServerCollapse, ServerPrecomputation,
         api::RecursionServerModule,
-        common::{PreparedF64, copy_vec_znx_rows, full_torus_f64_body_product_batch},
+        common::{PreparedF64, body_product_acc_parallel, copy_vec_znx_rows, encode_torus_body_f64},
     },
 };
 
@@ -110,7 +110,7 @@ where
             // per query (queries still run in parallel, each pack uses `cores / nq`
             // threads). Either way every core stays busy.
             let nq = chunk_queries.len();
-            let cores = num_threads(usize::MAX);
+            let cores = num_threads_online(usize::MAX);
             let threads_per_query = (cores / nq).max(1);
             let parallel_queries = (cores / threads_per_query).min(nq).max(1);
             let pool_needed = parallel_queries * threads_per_query;
@@ -213,74 +213,43 @@ where
         // Each query's `src0` blocks (shared across row groups) as GEMM columns.
         let src0s: Vec<&[_]> = queries.iter().map(|q| q.src0.as_slice()).collect();
 
-        let nthreads = num_threads(physical_rows);
-        let work = assign_panels(physical_rows, 1, nthreads);
-        // Per row group: `nq` queries × up-to-`rows_per_group` split bodies.
-        type GroupOut<BE> = Option<Vec<Vec<VecZnx<<BE as Backend>::OwnedBuf>>>>;
-        let mut group_out: Vec<GroupOut<BE>> = (0..physical_rows).map(|_| None).collect();
+        // The dominant `D·b0`: parallelized across `(row_group, output-row band)`
+        // tiles so all cores are used even when `physical_rows < threads` (the RHS
+        // is shared across row groups and decoded once). Returns `acc[rg]`
+        // (`n × nq`, query-fastest) per physical row group.
+        let rows_out = self.database.n();
+        let nthreads = num_threads_online(rows_out * physical_rows);
+        let acc_all =
+            body_product_acc_parallel(&db_views, &src0s, base2k, torus_bits, nthreads, gemm);
 
-        {
-            let db_views = &db_views;
-            let src0s = &src0s;
-            let mut slabs: Vec<&mut [GroupOut<BE>]> = Vec::with_capacity(work.len());
-            let mut rest = group_out.as_mut_slice();
-            for grp in &work {
-                let (head, tail) = rest.split_at_mut(grp.len());
-                slabs.push(head);
-                rest = tail;
-            }
-            std::thread::scope(|scope| {
-                for (slab, grp) in slabs.into_iter().zip(work.iter()) {
-                    scope.spawn(move || {
-                        for (slot, w) in slab.iter_mut().zip(grp.iter()) {
-                            let row_group = w.panel;
-                            // One GEMM for the whole batch against this panel.
-                            let mut res_bodies: Vec<VecZnx<BE::OwnedBuf>> =
-                                (0..nq).map(|_| module.vec_znx_alloc(1, size)).collect();
-                            full_torus_f64_body_product_batch::<BE>(
-                                &mut res_bodies,
-                                base2k,
-                                &db_views[row_group],
-                                src0s,
-                                base2k,
-                                torus_bits,
-                                gemm,
-                            );
-                            // Per-query row split into γ0-tall bodies.
-                            let mut per_query: Vec<Vec<VecZnx<BE::OwnedBuf>>> =
-                                (0..nq).map(|_| Vec::with_capacity(rows_per_group)).collect();
-                            for local in 0..rows_per_group {
-                                let batch_idx = row_group * rows_per_group + local;
-                                if batch_idx >= t {
-                                    break;
-                                }
-                                for (qi, res_body) in res_bodies.iter().enumerate() {
-                                    let mut body = module.vec_znx_alloc(1, size);
-                                    body.zero();
-                                    copy_vec_znx_rows(
-                                        &mut body,
-                                        0,
-                                        res_body,
-                                        local * gamma0,
-                                        gamma0,
-                                    );
-                                    per_query[qi].push(body);
-                                }
-                            }
-                            *slot = Some(per_query);
-                        }
-                    });
-                }
-            });
-        }
-
-        // Assemble per-query bodies in row-group order.
+        // Encode each row group's accumulator into a full-ring body per query, then
+        // split into γ0-tall bodies — assembled per query in grid-row order. This
+        // repack is O(n) per body, negligible against the GEMM above, so it stays
+        // serial.
         let mut all_bodies: Vec<Vec<VecZnx<BE::OwnedBuf>>> =
             (0..nq).map(|_| Vec::with_capacity(t)).collect();
-        for g in group_out {
-            let per_query = g.expect("l1 body worker did not fill its slot");
-            for (qi, bodies) in per_query.into_iter().enumerate() {
-                all_bodies[qi].extend(bodies);
+        let mut col = vec![0.0f64; rows_out];
+        for (rg, acc) in acc_all.iter().enumerate() {
+            let mut res_bodies: Vec<VecZnx<BE::OwnedBuf>> = Vec::with_capacity(nq);
+            for qi in 0..nq {
+                for (r, c) in col.iter_mut().enumerate() {
+                    *c = acc[r * nq + qi];
+                }
+                let mut res_body = module.vec_znx_alloc(1, size);
+                encode_torus_body_f64::<BE>(&mut res_body, base2k, &col, rows_out, torus_bits);
+                res_bodies.push(res_body);
+            }
+            for local in 0..rows_per_group {
+                let batch_idx = rg * rows_per_group + local;
+                if batch_idx >= t {
+                    break;
+                }
+                for (qi, res_body) in res_bodies.iter().enumerate() {
+                    let mut body = module.vec_znx_alloc(1, size);
+                    body.zero();
+                    copy_vec_znx_rows(&mut body, 0, res_body, local * gamma0, gamma0);
+                    all_bodies[qi].push(body);
+                }
             }
         }
         all_bodies
