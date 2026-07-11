@@ -1,30 +1,30 @@
-//! Unified toy-PIR driver: one example, two second-dimension *collapses*, selected
-//! at run time, each from its [default config](poulpy_pir::config).
+//! End-to-end PIR driver over the 32-byte default parameterizations.
 //!
-//! Both constructions answer through the same [`Server`] type (and the shared
-//! [`Response`]); they differ in the [default config](poulpy_pir::config) —
-//! cryptosystem `Collapse`, database layout, and payload type — bundled by the
-//! unified [`Config`](poulpy_pir::config::Config). Pick one on the command line:
+//! Runs the full round trip — setup, database fill, offline preprocessing,
+//! query, answer, decrypt — verifies every recovered payload against ground
+//! truth, and prints per-phase timings, wire sizes, and a noise estimate.
 //!
 //! ```text
-//! cargo run --release --example pir -- interpolation   # InsPIRe  (U256P65535)
-//! cargo run --release --example pir -- recursion        # InsPIRe² (U256P65536)
+//! cargo run --release --features avx512-fhe --example pir -- <preset> [batch]
 //! ```
 //!
-//! On a multi-socket (NUMA) host, pick the DB placement for the serving mode:
-//! the default build is tuned for batched throughput; add
-//! `--features numa-db-interleave` when optimizing single-query latency
-//! (interleaves the DB pages across nodes — see the README's NUMA section).
+//! `<preset>` is a [`DefaultPirParameters32B`] name such as
+//! `InsPIRe2-g32-1GiB-c32768`; run without arguments to list them all.
+//! `[batch]` is the number of queries answered together per online batch
+//! (default 1).
 //!
-//! PIR_ONLINE_THREADS=1 PIR_OFFLINE_THREADS=64 RUSTFLAGS="-C target-feature=+avx512f,+avx512dq" cargo run --release --features "avx512-fhe, cblas-gemm, numa-db-interleave" --example pir -- recursion
-//! PIR_ONLINE_THREADS=1 PIR_OFFLINE_THREADS=64 RUSTFLAGS="-C target-feature=+avx512f,+avx512dq" cargo run --release --features "avx512-fhe, cblas-gemm" --example pir -- recursion
+//! On a multi-socket (NUMA) host, pick the DB placement for the serving mode:
+//! add `--features numa-db-interleave` when `batch` is 1 (single-query
+//! latency); leave it off for batched serving. See `examples/README.md` for
+//! exact command lines and the top-level README's NUMA section for the
+//! rationale.
 
 use std::time::Instant;
 
 use poulpy_cpu_avx512::FFT64Avx512;
 use poulpy_pir::{
     client::Client,
-    config::{Collapse, Config, DefaultPirConfig32B, DefaultPirParameters32B, DefaultScheme},
+    config::{Collapse, Config, DefaultPirConfig32B, DefaultPirParameters32B},
     database::DatabaseLayout,
     payload::Payload,
     server::Server,
@@ -32,17 +32,14 @@ use poulpy_pir::{
 
 /// Backend used by this driver.
 type BE = FFT64Avx512;
-const DEFAULT: DefaultPirParameters32B = DefaultPirParameters32B::canonical(DefaultScheme::Recursion { gamma0: 32 }, 1);
-/// Number of queries answered together per ONLINE batch (`respond_batch_timed`).
-const BATCH: usize = 1;
+/// Payload index retrieved (and verified) by the first query of the batch.
+const ITEM_INDEX: usize = 1_000_000;
 /// Number of times the ONLINE batch is repeated; the online timings are averaged
 /// over the repeats for a stable measurement. Use with `PIR_ONLINE_THREADS=1` for
 /// single-thread online-phase experiments.
-const QUERIES: usize = 10;
+const REPEATS: usize = 10;
 
 fn main() {
-    const ITEM_INDEX: usize = 1_000_000;
-
     // cblas-gemm: the pthread OpenBLAS spawns its worker pool in its ELF
     // constructor — before main — sized from the constructor-time environment.
     // An unsized pool (127 threads here) spin-waits through the whole run and
@@ -61,16 +58,39 @@ fn main() {
         panic!("re-exec with OPENBLAS_NUM_THREADS=1 failed: {err}");
     }
 
-    match DEFAULT.resolve() {
-        DefaultPirConfig32B::Interpolation(params) => run(params.config, params.layout, ITEM_INDEX),
-        DefaultPirConfig32B::Recursion(params) => {
-            run(
-                params.config,
-                DatabaseLayout::new(32768, 1<<18),
-                ITEM_INDEX,
-            );
-        }
+    let mut cli = std::env::args().skip(1);
+    let Some(name) = cli.next() else { usage() };
+    let Some(preset) = DefaultPirParameters32B::from_name(&name) else {
+        eprintln!("unknown preset {name:?}\n");
+        usage();
+    };
+    let batch: usize = match cli.next() {
+        None => 1,
+        Some(s) => match s.parse() {
+            Ok(b) if b >= 1 => b,
+            _ => {
+                eprintln!("batch must be a positive integer, got {s:?}\n");
+                usage();
+            }
+        },
+    };
+
+    println!("preset                       : {}", preset.name());
+    match preset.resolve() {
+        DefaultPirConfig32B::Interpolation(p) => run(p.config, p.layout, ITEM_INDEX, batch),
+        DefaultPirConfig32B::Recursion(p) => run(p.config, p.layout, ITEM_INDEX, batch),
     }
+}
+
+fn usage() -> ! {
+    eprintln!("usage: pir <preset> [batch]\n");
+    eprintln!("  <preset>  one of the DefaultPirParameters32B names below");
+    eprintln!("  [batch]   queries answered together per online batch (default 1)\n");
+    eprintln!("available presets:");
+    for preset in DefaultPirParameters32B::ALL {
+        eprintln!("  {}", preset.name());
+    }
+    std::process::exit(2);
 }
 
 fn format_bytes(bytes: f64) -> String {
@@ -84,7 +104,7 @@ fn format_bytes(bytes: f64) -> String {
     format!("{value:.3} {}", UNITS[unit])
 }
 
-fn run<P>(config: Config<[u8; 32], P>, layout: DatabaseLayout<P>, item_index: usize)
+fn run<P>(config: Config<[u8; 32], P>, layout: DatabaseLayout<P>, item_index: usize, batch: usize)
 where
     P: Payload<[u8; 32]>,
 {
@@ -153,25 +173,25 @@ where
         println!("  {:<30}: {:?}", phase.name(), phase.duration());
     }
 
-    // ---- CLIENT: build `BATCH` queries (BATCH = 1 is the single-query case).
+    // ---- CLIENT: build `batch` queries (batch = 1 is the single-query case).
     // Items are spread across the DB so they land in different panels.
-    let stride = (capacity / BATCH).max(1);
-    let items: Vec<usize> = (0..BATCH)
+    let stride = (capacity / batch).max(1);
+    let items: Vec<usize> = (0..batch)
         .map(|k| (item_index + k * stride) % capacity)
         .collect();
 
     let t = Instant::now();
-    let mut queries = Vec::with_capacity(BATCH);
-    let mut states = Vec::with_capacity(BATCH);
+    let mut queries = Vec::with_capacity(batch);
+    let mut states = Vec::with_capacity(batch);
     for &item in &items {
         let (q, st) = client.query(item);
         queries.push(q);
         states.push(st);
     }
-    println!("QUERY (build {BATCH})            : {:?}", t.elapsed());
+    println!("QUERY (build {batch})            : {:?}", t.elapsed());
 
-    // ---- SERVER: answer the `BATCH` at once via `respond_batch_timed`, repeated
-    // `QUERIES` times; the ONLINE wall-clock and per-phase work are averaged over
+    // ---- SERVER: answer the batch at once via `respond_batch_timed`, repeated
+    // `REPEATS` times; the ONLINE wall-clock and per-phase work are averaged over
     // the repeats for a stable measurement (with `PIR_ONLINE_THREADS=1`, the
     // single-thread online phase). The phase breakdown is *summed work* across
     // the batch, so it exceeds the wall-clock; throughput uses the wall-clock.
@@ -180,7 +200,7 @@ where
     let mut phase_names: Vec<String> = Vec::new();
     let mut phase_sums: Vec<std::time::Duration> = Vec::new();
     let mut responses = Vec::new();
-    for rep in 0..QUERIES {
+    for rep in 0..REPEATS {
         let started = Instant::now();
         let (resps, online) = server.respond_batch_timed(&queries);
         total_wall += started.elapsed();
@@ -195,18 +215,18 @@ where
         responses = resps; // keep the last run's responses for verification
     }
 
-    let n = QUERIES as u32;
-    let avg_wall = total_wall / n;
-    println!("ONLINE avg wall ({BATCH} q × {QUERIES})    : {avg_wall:?}");
-    println!("ONLINE avg work (sum of phases): {:?}", total_work / n);
+    let reps = REPEATS as u32;
+    let avg_wall = total_wall / reps;
+    println!("ONLINE avg wall ({batch} q × {REPEATS})    : {avg_wall:?}");
+    println!("ONLINE avg work (sum of phases): {:?}", total_work / reps);
     for (name, sum) in phase_names.iter().zip(&phase_sums) {
-        println!("  {:<30}: {:?}", name, *sum / n);
+        println!("  {:<30}: {:?}", name, *sum / reps);
     }
-    if BATCH > 1 {
-        println!("  per query (wall-clock)     : {:?}", avg_wall / BATCH as u32);
+    if batch > 1 {
+        println!("  per query (wall-clock)     : {:?}", avg_wall / batch as u32);
         println!(
             "  throughput                 : {:.1} queries/s",
-            BATCH as f64 / avg_wall.as_secs_f64()
+            batch as f64 / avg_wall.as_secs_f64()
         );
     }
 
@@ -247,11 +267,11 @@ where
     println!("NOISE log2(max)              : {:.3}", noise.max_log2());
     println!("NOISE log2(std)              : {:.3}", noise.std_log2());
 
-    println!("RESULT                       : {ok}/{BATCH} decoded OK");
+    println!("RESULT                       : {ok}/{batch} decoded OK");
     if let Some(peak) = peak_rss_bytes() {
         println!("PEAK MEMORY (VmHWM)          : {}", format_bytes(peak as f64));
     }
-    assert_eq!(ok, BATCH, "{collapse:?} decode mismatch");
+    assert_eq!(ok, batch, "{collapse:?} decode mismatch");
 }
 
 /// Peak resident set size (high-water mark) of this process, in bytes, read from

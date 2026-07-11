@@ -14,16 +14,16 @@ poulpy-hal = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e0439
 poulpy-cpu-ref = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed", features = ["enable-core"] }
 poulpy-cpu-avx = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed", features = ["enable-avx"] }
 # AVX-512 FHE backend (FFT64Avx512). Optional and never named in the library —
-# only the `avx512_end_to_end` example (a run-site "binary") imports it, gated by
-# the `avx512-fhe` feature. `enable-avx512f` suffices (FFT64Avx512 needs only
+# only the `pir` example (a run-site "binary") imports it, gated by the
+# `avx512-fhe` feature. `enable-avx512f` suffices (FFT64Avx512 needs only
 # AVX-512F). NOTE: this crate has a compile-time guard requiring
 # `RUSTFLAGS="-C target-feature=+avx512f"`, so it only *builds* on an AVX-512F host.
 poulpy-cpu-avx512 = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed", features = ["enable-avx512f"], optional = true }
 
 [features]
-# Pulls in the optional AVX-512 FHE backend for the `avx512_end_to_end` example.
+# Pulls in the optional AVX-512 FHE backend for the `pir` example.
 # Build/run on an AVX-512F host with:
-#   RUSTFLAGS="-C target-feature=+avx512f" cargo run --release --features avx512-fhe --example avx512_end_to_end
+#   RUSTFLAGS="-C target-feature=+avx512f" cargo run --release --features avx512-fhe --example pir -- <preset>
 avx512-fhe = ["dep:poulpy-cpu-avx512"]
 # Expose `CblasDgemm`, a `Gemm` backend for the offline mask product backed by
 # the system CBLAS (`cblas_dgemm`). Links `libopenblas` — install the *pthread*
@@ -47,11 +47,6 @@ cblas-gemm = []
 # NUMA balancing migrating hot DB blocks adaptively beats any static placement
 # for the batched pipeline). Off = batch-throughput tuning (the default).
 numa-db-interleave = []
-
-[[example]]
-name = "avx512_end_to_end"
-path = "examples/avx512_end_to_end.rs"
-#required-features = ["avx512-fhe"]
 
 [[example]]
 name = "pir"

@@ -51,12 +51,15 @@ The reconstructed database splits from the paper's Table 2 are tabulated in [`ta
 The driver [`examples/pir.rs`](examples/pir.rs) runs a full round trip — setup, database fill, offline preprocessing, query, answer, and decrypt — checks the recovered payload against ground truth, and prints a phase-by-phase timing and noise breakdown.
 
 ```sh
-cargo run --release --example pir
+RUSTFLAGS="-C target-feature=+avx512f,+avx512dq" \
+cargo run --release --features avx512-fhe --example pir -- InsPIRe2-g32-1GiB-c32768
 ```
 
 > **Always build with `--release`** — a debug build is orders of magnitude slower.
 
-The example fixes the backend to the AVX2/FMA-accelerated `FFT64Avx` (`type BE = FFT64Avx`). The crate is generic over the backend, so for a portable, dependency-free build you can swap that alias for the scalar reference backend `poulpy_cpu_ref::FFT64Ref` — at a performance cost.
+The preset argument is a `DefaultPirParameters32B` name (run without arguments to list all of them), and an optional second argument sets the online batch size. See [`examples/README.md`](examples/README.md) for the exact command lines per database size and the batch-size/NUMA pairing.
+
+The example pins the backend to the AVX-512-accelerated `FFT64Avx512` (`type BE = FFT64Avx512`), which only builds on an AVX-512F host. The crate is generic over the backend, so for a portable, dependency-free build you can swap that alias for `poulpy_cpu_avx::FFT64Avx` (AVX2/FMA) or the scalar reference backend `poulpy_cpu_ref::FFT64Ref` — at a performance cost.
 
 ## Faster offline GEMM on wide-AVX-512 hosts (`cblas-gemm`)
 
@@ -66,12 +69,12 @@ pluggable dense-`f64` kernel behind the `server::Gemm` trait, defaulting to
 notably Intel Granite Rapids (AWS `c8i`), whose cores carry **three** 512-bit
 FMA pipes — the system OpenBLAS is measurably faster at the PIR shape. The
 `cblas-gemm` feature exposes `server::CblasDgemm` and wires it into the
-`avx512_end_to_end` example:
+`pir` example:
 
 ```sh
 sudo apt-get install libopenblas-pthread-dev  # pthread build, NOT -serial (see below)
 RUSTFLAGS="-C target-feature=+avx512f,+avx512dq" \
-  cargo run --release --features avx512-fhe,cblas-gemm --example avx512_end_to_end -- InsPIRe2-g64-32GiB-c262144
+  cargo run --release --features avx512-fhe,cblas-gemm --example pir -- InsPIRe2-g64-32GiB-c262144
 ```
 
 Measured on `c8i.32xlarge` (64 Granite Rapids cores / 128 SMT threads,
