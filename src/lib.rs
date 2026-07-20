@@ -3,6 +3,7 @@ pub mod config;
 pub mod database;
 pub mod encoding;
 pub mod interpolation;
+pub mod keyword;
 pub mod packing;
 pub(crate) mod numa;
 pub(crate) mod parallel;
