@@ -263,13 +263,51 @@ fn full_torus_f64_mask_product<BE>(
     encode_torus_mask_f64::<BE>(out, &acc, rows_out, lwe_n, torus_bits);
 }
 
-/// The pure-`f64` mask accumulation `sum_bc U_bc · A_bc`, optionally block-tiled
+/// Which axis [`mask_product_acc`] splits across its `mask_threads` workers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaskSplit {
+    /// Split the dst *columns* into contiguous strips (the default): every
+    /// output element is a single full-depth ascending-`bc` fold owned by one
+    /// thread, so the result is independent of `nt` (bit-identical to the
+    /// sequential fold on width-independent kernels).
+    Cols,
+    /// Split the `bc` *blocks* into contiguous ranges ("one matrix per
+    /// thread"): each worker contracts whole panels at full dst width, and the
+    /// per-range partials are reduced in ascending order. Faster — full-width
+    /// GEMMs (a 512-wide strip costs ~14% kernel throughput at PIR shape),
+    /// each panel is widened once per group instead of once per strip thread,
+    /// and no rhs strip copies — but the summation *grouping* now depends on
+    /// `nt`, so results vary by a few ulps across thread counts (the same
+    /// cryptographic-equivalence class as swapping the GEMM kernel; far below
+    /// the torus rounding margin and FHE noise floor).
+    Blocks,
+}
+
+/// Runtime selection: `PIR_MASK_SPLIT=blocks|cols` (default `cols`, the
+/// bit-exact status quo). Read once — the choice must not change mid-run.
+fn mask_split() -> MaskSplit {
+    static SPLIT: std::sync::OnceLock<MaskSplit> = std::sync::OnceLock::new();
+    *SPLIT.get_or_init(|| {
+        match std::env::var("PIR_MASK_SPLIT").as_deref() {
+            Ok("blocks") => MaskSplit::Blocks,
+            _ => MaskSplit::Cols,
+        }
+    })
+}
+
+/// The pure-`f64` mask accumulation `sum_bc U_bc · A_bc`, optionally split
 /// across `mask_threads` threads. `mask_threads <= 1` is the exact sequential
-/// left-fold (reference order). For `nt > 1` the `bc` range is split into `nt`
-/// contiguous ascending groups summed in parallel, then the partials are reduced
-/// in ascending group order — deterministic for a given `nt`, but not
-/// bit-identical to the sequential fold across different `nt` (f64 addition is
-/// non-associative; the gap is far below the FHE noise floor).
+/// left-fold (reference order). For `nt > 1` the split axis is chosen by
+/// [`mask_split`]: dst-column strips (default; `nt`-independent results) or
+/// `bc` block ranges (faster; see [`MaskSplit`] for the trade-off).
+///
+/// Column strips: each worker runs the full ascending-`bc` contraction for its
+/// own strip. Every output element is a single full-depth dot product
+/// accumulated in the reference block order by exactly one thread — no partial
+/// accumulators, no cross-thread reduction — so unlike a `bc`-range split the
+/// result does not depend on `nt` (measured bit-identical to the sequential
+/// fold on the private-gemm kernel; at worst a few ulps if a kernel's internal
+/// order were width-dependent, far below the FHE noise floor).
 fn mask_product_acc(
     prepared: &[PreparedF64],
     masks: &[QueryMask],
@@ -279,36 +317,109 @@ fn mask_product_acc(
     gemm: &dyn Gemm,
 ) -> Vec<f64> {
     let k = prepared.len();
-    let nt = mask_threads.clamp(1, k);
+    let nt = mask_threads.clamp(1, lwe_n);
     if nt <= 1 {
         let mut acc = vec![0.0f64; rows_out * lwe_n];
         accumulate_mask_range(&mut acc, prepared, masks, rows_out, lwe_n, 0..k, gemm);
         return acc;
     }
 
-    let base = k / nt;
-    let rem = k % nt;
-    let mut ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(nt);
-    let mut start = 0;
-    for i in 0..nt {
-        let len = base + usize::from(i < rem);
-        ranges.push(start..start + len);
-        start += len;
+    if mask_split() == MaskSplit::Blocks && k >= 2 {
+        // One matrix per thread: contiguous `bc` ranges, each contracted at
+        // full dst width into its own partial (via the same sequential
+        // building block), then reduced in ascending range order.
+        let ntk = nt.min(k);
+        let base = k / ntk;
+        let rem = k % ntk;
+        let mut ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(ntk);
+        let mut start = 0;
+        for i in 0..ntk {
+            let len = base + usize::from(i < rem);
+            ranges.push(start..start + len);
+            start += len;
+        }
+        let mut partials: Vec<Vec<f64>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = ranges
+                .into_iter()
+                .map(|range| {
+                    scope.spawn(move || {
+                        let mut part = vec![0.0f64; rows_out * lwe_n];
+                        accumulate_mask_range(
+                            &mut part, prepared, masks, rows_out, lwe_n, range, gemm,
+                        );
+                        part
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let mut acc = std::mem::take(&mut partials[0]);
+        for part in &partials[1..] {
+            for (a, p) in acc.iter_mut().zip(part.iter()) {
+                *a += *p;
+            }
+        }
+        return acc;
     }
-    let mut partials: Vec<Vec<f64>> = (0..nt).map(|_| vec![0.0f64; rows_out * lwe_n]).collect();
+
+    let base = lwe_n / nt;
+    let rem = lwe_n % nt;
+    let mut strips: Vec<(usize, usize)> = Vec::with_capacity(nt); // (col_start, width)
+    let mut col = 0;
+    for i in 0..nt {
+        let width = base + usize::from(i < rem);
+        strips.push((col, width));
+        col += width;
+    }
+    let mut acc = vec![0.0f64; rows_out * lwe_n];
     std::thread::scope(|scope| {
-        for (part, range) in partials.iter_mut().zip(ranges.into_iter()) {
-            scope.spawn(move || {
-                accumulate_mask_range(part, prepared, masks, rows_out, lwe_n, range, gemm);
-            });
+        let handles: Vec<_> = strips
+            .iter()
+            .map(|&(col_start, width)| {
+                scope.spawn(move || {
+                    // Thread-local contiguous strip accumulator plus a
+                    // contiguous copy of the rhs column strip, contracted with
+                    // the *same* widen + dense-GEMM kernel as the sequential
+                    // fold (the kernel's per-column accumulation order is
+                    // width-independent, which is what makes the strips
+                    // bit-identical to the reference; the trait's i16 entry
+                    // point would delegate width 1 to the GEMV kernel and
+                    // break that). The widen is O(panel) per thread and
+                    // negligible against the O(n³/nt) strip GEMM.
+                    let mut local = vec![0.0f64; rows_out * width];
+                    let mut wide: Vec<f64> = Vec::new();
+                    let mut rhs_strip: Vec<f64> = Vec::new();
+                    for bc in 0..k {
+                        let u = &prepared[bc];
+                        let rhs = &masks[bc];
+                        rhs_strip.resize(u.rows_in * width, 0.0);
+                        for r in 0..u.rows_in {
+                            let src = r * lwe_n + col_start;
+                            rhs_strip[r * width..(r + 1) * width]
+                                .copy_from_slice(&rhs.values[src..src + width]);
+                        }
+                        u.widen_into(&mut wide);
+                        gemm.gemm_f64_add(
+                            &mut local,
+                            &wide,
+                            &rhs_strip,
+                            rows_out,
+                            u.rows_in,
+                            width,
+                        );
+                    }
+                    (col_start, width, local)
+                })
+            })
+            .collect();
+        for handle in handles {
+            let (col_start, width, local) = handle.join().unwrap();
+            for r in 0..rows_out {
+                let dst = r * lwe_n + col_start;
+                acc[dst..dst + width].copy_from_slice(&local[r * width..(r + 1) * width]);
+            }
         }
     });
-    let mut acc = std::mem::take(&mut partials[0]);
-    for part in &partials[1..] {
-        for (a, p) in acc.iter_mut().zip(part.iter()) {
-            *a += *p;
-        }
-    }
     acc
 }
 
@@ -500,6 +611,110 @@ fn encode_torus_mask_f64<BE>(
     }
 }
 
+/// Parallel level-1 body accumulator over the whole DB. For each physical row
+/// group `rg`, returns `acc[rg]` (row-major `rows_out × q`, query fastest) equal
+/// to `Σ_bc U(rg,bc) · b_bc` for the query batch — the same quantity
+/// [`full_torus_f64_body_product_batch`] computes per group, but:
+///
+/// * the shared query RHS (`bodies_per_query`, identical for every row group) is
+///   decoded **once** instead of once per group, and
+/// * the work is parallelized across `(row_group, output-row band)` tiles, so all
+///   `nthreads` cores are used even when the row-group count is below the thread
+///   count (the online first dimension's dominant `D·b0`).
+///
+/// Output rows are independent GEMV rows, so the band split needs no partial-sum
+/// reduction and the result is bit-identical to the serial per-group order. When
+/// `nthreads <= physical_rows` each group is a single tile (the original
+/// whole-panel GEMM). The caller encodes/​splits each returned `acc[rg]`.
+#[allow(clippy::type_complexity)]
+pub(super) fn body_product_acc_parallel(
+    db_views: &[Vec<PreparedF64>],
+    bodies_per_query: &[&[GLWECompressed<Vec<u8>>]],
+    body_base2k: usize,
+    torus_bits: usize,
+    nthreads: usize,
+    gemm: &dyn Gemm,
+) -> Vec<Vec<f64>> {
+    let physical_rows = db_views.len();
+    assert!(physical_rows > 0, "cannot accumulate an empty DB");
+    let nblocks = db_views[0].len();
+    let q = bodies_per_query.len();
+    assert!(q > 0, "cannot run an empty body-product batch");
+    for bodies in bodies_per_query {
+        assert_eq!(bodies.len(), nblocks, "per-query block count differs");
+    }
+    let rows_out = db_views[0][0].rows_out;
+
+    // Decode the query bodies once; `rhs_all[bc]` is row-major `rows_in × q`
+    // (query fastest), the layout `gemm_i16_f64_add` contracts against. Shared
+    // read-only across every row group and every output-row band below.
+    let mut rhs_all: Vec<Vec<f64>> = Vec::with_capacity(nblocks);
+    {
+        let mut tmp: Vec<i64> = Vec::new();
+        for bc in 0..nblocks {
+            let rows_in = db_views[0][bc].rows_in;
+            let mut rhs = vec![0.0f64; rows_in * q];
+            for (qi, bodies) in bodies_per_query.iter().enumerate() {
+                decode_torus_body_into_col(
+                    &mut rhs,
+                    qi,
+                    q,
+                    bodies[bc].data(),
+                    rows_in,
+                    body_base2k,
+                    torus_bits,
+                    &mut tmp,
+                );
+            }
+            rhs_all.push(rhs);
+        }
+    }
+
+    // One accumulator per row group; the tiles below borrow disjoint output-row
+    // bands of these buffers, so their writes never alias across threads.
+    let mut acc_all: Vec<Vec<f64>> = (0..physical_rows)
+        .map(|_| vec![0.0f64; rows_out * q])
+        .collect();
+
+    // Split each group's `rows_out` into `tiles_per_group` bands so the total tile
+    // count reaches `nthreads` even with few row groups.
+    let tiles_per_group = nthreads.div_ceil(physical_rows).max(1);
+    let band = rows_out.div_ceil(tiles_per_group).max(1);
+    let mut tiles: Vec<(usize, usize, &mut [f64])> = Vec::new();
+    for (rg, acc) in acc_all.iter_mut().enumerate() {
+        let mut r0 = 0;
+        let mut rest = acc.as_mut_slice();
+        while r0 < rows_out {
+            let len = band.min(rows_out - r0);
+            let (head, tail) = rest.split_at_mut(len * q);
+            tiles.push((rg, r0, head));
+            rest = tail;
+            r0 += len;
+        }
+    }
+
+    let rhs_all = &rhs_all;
+    let chunk = tiles.len().div_ceil(nthreads.max(1)).max(1);
+    std::thread::scope(|scope| {
+        for group in tiles.chunks_mut(chunk) {
+            scope.spawn(move || {
+                for tile in group.iter_mut() {
+                    let (rg, r0) = (tile.0, tile.1);
+                    let rows_band = tile.2.len() / q;
+                    for bc in 0..nblocks {
+                        let u = &db_views[rg][bc];
+                        let rin = u.rows_in;
+                        let u_band = &u.values[r0 * rin..(r0 + rows_band) * rin];
+                        gemm.gemm_i16_f64_add(&mut *tile.2, u_band, &rhs_all[bc], rows_band, rin, q);
+                    }
+                }
+            });
+        }
+    });
+
+    acc_all
+}
+
 /// Decodes the single body column (`col 0`) of `body` into `out[0..rows]` as real
 /// torus values in `[-0.5, 0.5)`.
 fn decode_torus_body_f64(
@@ -519,7 +734,7 @@ fn decode_torus_body_f64(
 
 /// Encodes the `rows`-long real body accumulator into `out`'s column 0 at
 /// `out_base2k`; coefficients beyond `rows` (up to the ring degree) are zeroed.
-fn encode_torus_body_f64<BE>(
+pub(super) fn encode_torus_body_f64<BE>(
     out: &mut VecZnx<BE::OwnedBuf>,
     out_base2k: usize,
     acc: &[f64],

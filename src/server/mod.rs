@@ -48,6 +48,8 @@ mod oep;
 mod recursion;
 
 use api::{InterpolationServerModule, RecursionServerModule};
+#[cfg(feature = "cblas-gemm")]
+pub use gemm::CblasDgemm;
 pub use gemm::{Gemm, PrivateGemmX86};
 pub use interpolation::InterpolationPrecomputation;
 use interpolation::InterpolationState;
@@ -308,6 +310,13 @@ pub struct Server<BE: Backend, P: Payload<[u8; 32]>> {
     /// to [`PrivateGemmX86`]; swap it with [`Server::with_gemm`] to plug a custom
     /// kernel on top of the FHE backend `BE`.
     gemm: Box<dyn Gemm>,
+    /// Cached pack-scratch arena size (recursion only; see `scratch_for_pack`).
+    /// Sizing is a pure function of the fixed parameters but *expensive* to
+    /// compute (it builds a probe layout and queries the backend's tmp-bytes
+    /// planners, ~30-60 ms) and was being recomputed twice per online query —
+    /// measured as most of the ONLINE wall-clock vs sum-of-phases gap.
+    /// `OnceLock` because online workers call it through `&self`.
+    pack_scratch_bytes: std::sync::OnceLock<usize>,
 }
 
 impl<BE: Backend, P: Payload<[u8; 32]>> Server<BE, P> {
@@ -357,6 +366,7 @@ where
     /// Compatibility/internal constructor for call sites that already own
     /// instantiated parameters.
     pub fn from_params(params: Parameters<BE, [u8; 32], P>, layout: DatabaseLayout<P>) -> Self {
+        crate::parallel::tune_allocator();
         match params.collapse() {
             Collapse::Interpolation => Self::new_interpolation(params, layout),
             Collapse::Recursion { .. } => Self::new_recursion(params, layout),

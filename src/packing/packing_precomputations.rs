@@ -239,6 +239,24 @@ impl<BE: Backend> PackingPrecomputations<BE> {
             .expect("packing precomputations built for a different backend plan type")
     }
 
+    /// Visit the raw backing buffers as `(pointer, byte length)` pairs — used
+    /// to apply an explicit NUMA placement policy to the offline precomputes
+    /// (the online pack streams them from worker threads on every node).
+    pub(crate) fn for_each_buffer(&self, mut f: impl FnMut(*const u8, usize))
+    where
+        BE::OwnedBuf: poulpy_hal::layouts::HostDataRef,
+    {
+        use poulpy_hal::layouts::ZnxView;
+        let raw = self.body_vmp_masks.raw();
+        f(raw.as_ptr().cast(), size_of_val(raw));
+        let raw = self.final_mask.raw();
+        f(raw.as_ptr().cast(), size_of_val(raw));
+        for mask in &self.bsgs_masks {
+            let raw = mask.raw();
+            f(raw.as_ptr().cast(), size_of_val(raw));
+        }
+    }
+
     /// Number of baby keys expected by the online `key_g` BSGS pass.
     pub(crate) fn bsgs_baby_size(&self) -> usize {
         self.bsgs_baby_size

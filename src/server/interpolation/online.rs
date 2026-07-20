@@ -19,7 +19,7 @@ use crate::{
     client::Response,
     interpolation::{InterpolationQuery, InterpolationResponse},
     packing::Packing,
-    parallel::{assign_panels, num_threads, scoped_workers_pooled},
+    parallel::{assign_panels, num_threads_online, scoped_workers_pooled},
     payload::Payload,
     server::{
         Gemm, OnlineTimings, Server, ServerCollapse, ServerPrecomputation,
@@ -77,7 +77,7 @@ where
         let body_base2k = self.params.matmul_base2k();
         let torus_bits = self.params.k();
         let k = self.layout.block_cols(self.params.n());
-        let nthreads = num_threads(panels);
+        let nthreads = num_threads_online(panels);
 
         // Lazily grow the persistent per-worker scratch pool (allocated once,
         // reused across queries — plan M2′) so the parallel region pays no
@@ -248,7 +248,7 @@ where
         let body_base2k = self.params.matmul_base2k();
         let torus_bits = self.params.k();
         let k = self.layout.block_cols(self.params.n());
-        let nthreads = num_threads(panels);
+        let nthreads = num_threads_online(panels);
 
         while self.scratch_pool.len() < nthreads {
             self.scratch_pool

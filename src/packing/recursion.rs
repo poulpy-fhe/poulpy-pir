@@ -16,7 +16,7 @@ use poulpy_hal::{
 
 use crate::{
     packing::{Packing, PackingKeys, PackingPrecomputations},
-    parallel::{assign_panels, num_threads, scoped_workers_pooled},
+    parallel::{assign_panels, num_threads_online, scoped_workers_pooled},
 };
 
 /// Number of base2k=16 decomposition digits for a `qtilde`-modulus plaintext.
@@ -129,7 +129,7 @@ where
 {
     let count = packed_inputs.len();
     let qtilde_infos = qtilde_glwe_layout(src_infos.n(), qtilde_bits);
-    let nthreads = num_threads(count).min(pool.len().max(1));
+    let nthreads = num_threads_online(count).min(pool.len().max(1));
     let work = assign_panels(count, 1, nthreads);
 
     let mut outputs: Vec<Option<GLWE<BE::OwnedBuf>>> = (0..count).map(|_| None).collect();

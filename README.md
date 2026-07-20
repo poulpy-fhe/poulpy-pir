@@ -51,12 +51,93 @@ The reconstructed database splits from the paper's Table 2 are tabulated in [`ta
 The driver [`examples/pir.rs`](examples/pir.rs) runs a full round trip — setup, database fill, offline preprocessing, query, answer, and decrypt — checks the recovered payload against ground truth, and prints a phase-by-phase timing and noise breakdown.
 
 ```sh
-cargo run --release --example pir
+RUSTFLAGS="-C target-feature=+avx512f,+avx512dq" \
+cargo run --release --features avx512-fhe --example pir -- InsPIRe2-g32-1GiB-c32768
 ```
 
 > **Always build with `--release`** — a debug build is orders of magnitude slower.
 
-The example fixes the backend to the AVX2/FMA-accelerated `FFT64Avx` (`type BE = FFT64Avx`). The crate is generic over the backend, so for a portable, dependency-free build you can swap that alias for the scalar reference backend `poulpy_cpu_ref::FFT64Ref` — at a performance cost.
+The preset argument is a `DefaultPirParameters32B` name (run without arguments to list all of them), and an optional second argument sets the online batch size. See [`examples/README.md`](examples/README.md) for the exact command lines per database size and the batch-size/NUMA pairing.
+
+The example pins the backend to the AVX-512-accelerated `FFT64Avx512` (`type BE = FFT64Avx512`), which only builds on an AVX-512F host. The crate is generic over the backend, so for a portable, dependency-free build you can swap that alias for `poulpy_cpu_avx::FFT64Avx` (AVX2/FMA) or the scalar reference backend `poulpy_cpu_ref::FFT64Ref` — at a performance cost.
+
+## Faster offline GEMM on wide-AVX-512 hosts (`cblas-gemm`)
+
+The offline mask product (`sum U·A`, the dominant `O(N·d)` phase) runs on a
+pluggable dense-`f64` kernel behind the `server::Gemm` trait, defaulting to
+`private-gemm-x86`. On CPUs with more FMA width than that kernel exploits —
+notably Intel Granite Rapids (AWS `c8i`), whose cores carry **three** 512-bit
+FMA pipes — the system OpenBLAS is measurably faster at the PIR shape. The
+`cblas-gemm` feature exposes `server::CblasDgemm` and wires it into the
+`pir` example:
+
+```sh
+sudo apt-get install libopenblas-pthread-dev  # pthread build, NOT -serial (see below)
+RUSTFLAGS="-C target-feature=+avx512f,+avx512dq" \
+  cargo run --release --features avx512-fhe,cblas-gemm --example pir -- InsPIRe2-g64-32GiB-c262144
+```
+
+Measured on `c8i.32xlarge` (64 Granite Rapids cores / 128 SMT threads,
+32 GiB DB, `InsPIRe2-g64-32GiB-c262144`): `recursion.l1.mask_product` drops
+from 23.4 s to **19.8 s**, matching a 128-physical-core `c7a.32xlarge`. On
+AMD hosts (`c7a`) the two kernels are close — measure before switching.
+Keep the default 1-worker-per-logical-CPU fan-out: the SMT siblings hide the
+panel-widening memory stalls (capping `PIR_THREADS` at 64 or 96 measures
+*slower* end-to-end despite higher synthetic per-call GEMM throughput).
+
+Install the **pthread** OpenBLAS variant: the server issues dgemm from many
+of its own workers concurrently, and Debian/Ubuntu's `-serial` build has no
+locking on its internal buffer pool — under concurrent callers it silently
+corrupts results (measured). Additionally, **run with
+`OPENBLAS_NUM_THREADS=1` in the environment**: the pthread build spawns its
+worker pool in its ELF constructor (before `main`), and an unsized pool of
+128 spin-waiting threads slows even the non-BLAS phases (~2× on the
+single-threaded online path, measured) — `CblasDgemm`'s runtime pin stops
+dispatch to the pool but cannot un-spawn it. The bundled examples enforce
+this by re-exec'ing once with the variable set when it is absent, so
+`cargo run` just works; standalone integrations must set it themselves.
+Point `CBLAS_LIB_DIR`/`CBLAS_LIB_NAME` at another CBLAS (it must be
+concurrent-caller-safe and single-threaded per call) to swap libraries
+without touching code.
+
+## Tuning multi-socket (NUMA) hosts
+
+The server is tuned with **batched throughput as the priority**. Two
+placement decisions follow from measurements on a 2 × 64-core Zen 4 host
+with a 32 GiB database (batch 256):
+
+- The offline packing precomputes get an explicit `mbind(MPOL_INTERLEAVE)`
+  policy at the end of `offline()` (Linux/x86-64). The explicit VMA policy
+  exempts them from the kernel's **automatic NUMA balancing**, whose hint
+  faults and migrations otherwise add an unstable 50–250 ms to per-query
+  pack latency while the online workers stream them. This is neutral for
+  batch throughput.
+- Database placement is a **compile-time choice** via the
+  `numa-db-interleave` feature, because the two serving modes want opposite
+  policies:
+  - **Off (default) — batch throughput.** The DB gets no explicit placement:
+    batched serving measures ~12% faster when automatic balancing is left
+    free to migrate the hot DB blocks adaptively than under any static
+    policy tried (blanket interleave, per-row-group node binding with pinned
+    workers, or a parallel first-touch spread). The trade-off is
+    single-query latency: the DB is first-touched onto the fill writer's
+    node, so a lone query's memory-bound body product runs at one node's
+    bandwidth (~1.5 s instead of ~0.2 s online for a 32 GiB DB).
+  - **On (`--features numa-db-interleave`) — single-query latency.** The DB
+    pages are spread across the nodes with `mbind(MPOL_INTERLEAVE)` at
+    allocation and pre-faulted from parallel workers, so the body product
+    runs at every node's bandwidth and the pages are exempt from automatic
+    balancing. Prefer this over `numactl --interleave=all` when you can
+    rebuild: it scopes the policy to the DB, leaving the offline GEMM's
+    buffers unaffected (blanket `numactl` costs the offline GEMM ~15%).
+
+On a dedicated batch-serving host, also consider disabling automatic
+balancing entirely — it was worth another ~5–8% batch throughput in our
+measurements, on top of removing per-query jitter:
+
+```sh
+sudo sysctl -w kernel.numa_balancing=0
+```
 
 ## License
 

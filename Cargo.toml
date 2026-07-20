@@ -5,6 +5,15 @@ edition = "2024"
 
 [dependencies]
 getrandom = "0.4"
+# Minimal perfect hashing for keyword PIR (`src/keyword`). `default-features =
+# false` drops the elias-fano / cacheline-ef packings, which the pinned
+# `KeywordIndex` instantiation does not use; `epserde` is what lets the server
+# serialize the MPHF parameters for the client to download.
+ptr_hash = { version = "2.0.2", default-features = false, features = ["epserde"] }
+epserde = "0.13"
+# Key tags in `src/keyword/record.rs` (XXH3-128, domain-separated from the hash
+# ptr_hash uses internally).
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 private-gemm-x86 = { version = "=0.1.20", default-features = false }
 # Pinned: poulpy-pir is adapted to this exact poulpy commit. Pinning isolates it
 # from poulpy `main` drift; bump the rev deliberately when migrating to a newer
@@ -14,21 +23,43 @@ poulpy-hal = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e0439
 poulpy-cpu-ref = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed", features = ["enable-core"] }
 poulpy-cpu-avx = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed", features = ["enable-avx"] }
 # AVX-512 FHE backend (FFT64Avx512). Optional and never named in the library —
-# only the `avx512_end_to_end` example (a run-site "binary") imports it, gated by
-# the `avx512-fhe` feature. `enable-avx512f` suffices (FFT64Avx512 needs only
+# only the `pir` example (a run-site "binary") imports it, gated by the
+# `avx512-fhe` feature. `enable-avx512f` suffices (FFT64Avx512 needs only
 # AVX-512F). NOTE: this crate has a compile-time guard requiring
 # `RUSTFLAGS="-C target-feature=+avx512f"`, so it only *builds* on an AVX-512F host.
 poulpy-cpu-avx512 = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed", features = ["enable-avx512f"], optional = true }
 
 [features]
-# Pulls in the optional AVX-512 FHE backend for the `avx512_end_to_end` example.
+# Pulls in the optional AVX-512 FHE backend for the `pir` example.
 # Build/run on an AVX-512F host with:
-#   RUSTFLAGS="-C target-feature=+avx512f" cargo run --release --features avx512-fhe --example avx512_end_to_end
+#   RUSTFLAGS="-C target-feature=+avx512f" cargo run --release --features avx512-fhe --example pir -- <preset>
 avx512-fhe = ["dep:poulpy-cpu-avx512"]
+# Expose `CblasDgemm`, a `Gemm` backend for the offline mask product backed by
+# the system CBLAS (`cblas_dgemm`). Links `libopenblas` — install the *pthread*
+# build (Ubuntu: `libopenblas-pthread-dev`) and run with
+# `OPENBLAS_NUM_THREADS=1` set in the environment (constructor-read: it must
+# be set before the process starts; the examples re-exec to enforce it). The
+# server fans dgemm out across its own workers, and only the pthread build's
+# buffer pool is locked for concurrent callers (Debian's "serial" build
+# corrupts results under concurrent use — measured); the env var keeps that
+# build from spawning its 1-per-CPU spin-waiting pool, which otherwise slows
+# even non-BLAS phases (~2x on the single-threaded online path — measured).
+# build.rs probes the distro's off-path pthread directories, or set
+# `CBLAS_LIB_DIR` / `CBLAS_LIB_NAME` explicitly. Motivation: on wide-AVX-512
+# cores (Granite Rapids c8i: 3×512-bit FMA pipes) OpenBLAS's dgemm sustains
+# ~1.5-1.7× private-gemm-x86's throughput at the 2048³ PIR shape.
+cblas-gemm = []
+# Pin the database pages across NUMA nodes with mbind(MPOL_INTERLEAVE) at
+# allocation (Linux/x86-64). Choose per deployment: single-query latency on
+# multi-socket hosts improves ~7x (memory-bound l1 body product runs at every
+# node's bandwidth instead of one), but batched serving loses ~12% (automatic
+# NUMA balancing migrating hot DB blocks adaptively beats any static placement
+# for the batched pipeline). Off = batch-throughput tuning (the default).
+numa-db-interleave = []
 
 [[example]]
-name = "avx512_end_to_end"
-path = "examples/avx512_end_to_end.rs"
+name = "pir"
+path = "examples/pir.rs"
 required-features = ["avx512-fhe"]
 
 [[bench]]

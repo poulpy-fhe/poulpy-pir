@@ -97,6 +97,7 @@ where
                 InterpolationPrecomputation::default(),
             ),
             gemm: Box::new(crate::server::PrivateGemmX86),
+            pack_scratch_bytes: std::sync::OnceLock::new(),
         }
     }
 
