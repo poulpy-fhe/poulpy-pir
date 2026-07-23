@@ -1031,6 +1031,7 @@ dependencies = [
 [[package]]
 name = "poulpy-core"
 version = "0.6.0"
+source = "git+https://github.com/poulpy-fhe/poulpy?rev=a983ad09b36a869982b95d407a1a2a0c63ae2907#a983ad09b36a869982b95d407a1a2a0c63ae2907"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1048,6 +1049,7 @@ dependencies = [
 [[package]]
 name = "poulpy-cpu-avx"
 version = "0.6.0"
+source = "git+https://github.com/poulpy-fhe/poulpy?rev=a983ad09b36a869982b95d407a1a2a0c63ae2907#a983ad09b36a869982b95d407a1a2a0c63ae2907"
 dependencies = [
  "bytemuck",
  "byteorder",
@@ -1066,6 +1068,7 @@ dependencies = [
 [[package]]
 name = "poulpy-cpu-avx512"
 version = "0.6.0"
+source = "git+https://github.com/poulpy-fhe/poulpy?rev=a983ad09b36a869982b95d407a1a2a0c63ae2907#a983ad09b36a869982b95d407a1a2a0c63ae2907"
 dependencies = [
  "bytemuck",
  "byteorder",
@@ -1084,6 +1087,7 @@ dependencies = [
 [[package]]
 name = "poulpy-cpu-ref"
 version = "0.6.0"
+source = "git+https://github.com/poulpy-fhe/poulpy?rev=a983ad09b36a869982b95d407a1a2a0c63ae2907#a983ad09b36a869982b95d407a1a2a0c63ae2907"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1102,6 +1106,7 @@ dependencies = [
 [[package]]
 name = "poulpy-hal"
 version = "0.6.0"
+source = "git+https://github.com/poulpy-fhe/poulpy?rev=a983ad09b36a869982b95d407a1a2a0c63ae2907#a983ad09b36a869982b95d407a1a2a0c63ae2907"
 dependencies = [
  "anyhow",
  "bytemuck",
