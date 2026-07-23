@@ -40,6 +40,33 @@ The timing report counts the complete `recursion.resp2.worker_region` once.
 Its allocation, deallocation, scheduling, and arithmetic breakdown is printed
 separately as overlapping diagnostics and is excluded from the online total.
 
+## Automated single-query benchmark matrix
+
+[`run_single_query_benchmarks.sh`](run_single_query_benchmarks.sh) builds the
+AVX-512, CBLAS, NUMA-interleaved example once and runs these single-query
+matrices:
+
+- 32, 16, 8, 4, 2, and 1 GiB with `PIR_ONLINE_THREADS=1`.
+- 32 GiB with `PIR_ONLINE_THREADS=1,2,4,8,16,32,64`.
+
+Setup and offline preprocessing use every logical CPU available to the process
+(`nproc`), while OpenBLAS stays at one thread per server-issued call. Response-2
+uses the pooled scratch path and its budget-aware default nested schedule. The
+32 GiB / one-thread case is intentionally executed once in each matrix.
+
+The 32 GiB preset needs roughly 56 GiB of process memory. Install the pthread
+OpenBLAS development package before running the script:
+
+```sh
+sudo apt-get install libopenblas-pthread-dev
+./examples/run_single_query_benchmarks.sh
+```
+
+Each invocation creates a timestamped directory under `benchmark-results/`
+containing one log per case, a TSV manifest, and machine/build metadata. Set
+`PIR_BENCH_RESULTS_DIR` to place the results elsewhere, or
+`PIR_BENCH_MAX_THREADS` to override the detected maximum worker count.
+
 ## Commands (InsPIRe², γ0 = 32, batch = 1)
 
 ```sh
