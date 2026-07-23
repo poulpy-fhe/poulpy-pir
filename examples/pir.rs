@@ -199,6 +199,8 @@ where
     let mut total_work = std::time::Duration::ZERO;
     let mut phase_names: Vec<String> = Vec::new();
     let mut phase_sums: Vec<std::time::Duration> = Vec::new();
+    let mut diagnostic_names: Vec<String> = Vec::new();
+    let mut diagnostic_sums: Vec<std::time::Duration> = Vec::new();
     let mut responses = Vec::new();
     for rep in 0..REPEATS {
         let started = Instant::now();
@@ -212,6 +214,13 @@ where
             }
             phase_sums[i] += phase.duration();
         }
+        for (i, diagnostic) in online.diagnostics().iter().enumerate() {
+            if rep == 0 {
+                diagnostic_names.push(diagnostic.name().to_string());
+                diagnostic_sums.push(std::time::Duration::ZERO);
+            }
+            diagnostic_sums[i] += diagnostic.duration();
+        }
         responses = resps; // keep the last run's responses for verification
     }
 
@@ -221,6 +230,12 @@ where
     println!("ONLINE avg work (sum of phases): {:?}", total_work / reps);
     for (name, sum) in phase_names.iter().zip(&phase_sums) {
         println!("  {:<30}: {:?}", name, *sum / reps);
+    }
+    if !diagnostic_names.is_empty() {
+        println!("ONLINE nested diagnostics (excluded from total):");
+        for (name, sum) in diagnostic_names.iter().zip(&diagnostic_sums) {
+            println!("  {:<30}: {:?}", name, *sum / reps);
+        }
     }
     if batch > 1 {
         println!("  per query (wall-clock)     : {:?}", avg_wall / batch as u32);

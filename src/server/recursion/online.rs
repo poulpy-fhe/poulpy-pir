@@ -30,7 +30,7 @@ use super::{
 };
 
 #[allow(private_bounds)]
-impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Server<BE, P>
+impl<BE: Backend<OwnedBuf = Vec<u8>, ScalarPrep = f64>, P: Payload<[u8; 32]>> Server<BE, P>
 where
     BE: poulpy_cpu_ref::reference::fft64::reim::ReimArith,
     Module<BE>: RecursionServerModule<BE>,
@@ -117,11 +117,16 @@ where
 
             // Move the scratch pool out of `self` so the workers can borrow `&self`
             // while holding disjoint pool slices; reused across chunks, then restored.
+            let pool_started = Instant::now();
             let mut pool = std::mem::take(&mut self.scratch_pool);
             let pack_bytes = self.scratch_for_pack();
             while pool.len() < pool_needed {
                 pool.push(ScratchOwned::<BE>::alloc(pack_bytes));
             }
+            chunk_timings.add_pool_growth(
+                "recursion.scratch_pool_growth",
+                pool_started.elapsed(),
+            );
 
             let mut resp_slots: Vec<Option<Response<BE>>> = (0..nq).map(|_| None).collect();
             let mut worker_timings: Vec<OnlineTimings> =
@@ -356,8 +361,15 @@ where
 
         // resp2: the digit DB is query-dependent (mask precompute runs online).
         let q1_masks = &state.q1_masks;
-        let (resp2_prepared, resp2_precomputes) =
-            self.precompute_pack_mask_online(&body_data, q1_masks, gamma2, &key2, max_threads, timings);
+        let (resp2_prepared, resp2_precomputes) = self.precompute_pack_mask_online(
+            &body_data,
+            q1_masks,
+            gamma2,
+            &key2,
+            pool,
+            max_threads,
+            timings,
+        );
         let (resp2, resp2_body, resp2_pack) = pack_bodies_pooled(
             module,
             &state.src_infos,
@@ -383,12 +395,14 @@ where
         ck: &'q CompressedKey<BE>,
         scratch: &mut ScratchOwned<BE>,
     ) -> KeyBundle<'q, BE> {
-        let precomp = self.params.module().pack_partial_keys_precompute(
+        let module = self.params.module();
+        let mut precomp = module.pack_partial_keys_precompute(
             &ck.key,
             ck.stride,
             self.params.baby_size(),
             &mut scratch.borrow(),
         );
+        precomp.build_qtilde_keys(module, qtilde_bits(&self.params));
         KeyBundle {
             key: &ck.key,
             precomp,

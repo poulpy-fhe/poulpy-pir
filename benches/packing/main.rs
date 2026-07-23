@@ -23,7 +23,12 @@ use poulpy_hal::{
     },
     source::Source,
 };
-use poulpy_pir::packing::{Packing, PackingMaskAggregation, PackingPrecomputeInfos};
+use poulpy_pir::packing::{
+    Packing, PackingKeysGenerate, PackingMaskAggregation, PackingPrecomputeInfos,
+    recursion::{
+        balance_base2k16, modulus_switch_to_digits, qtilde_glwe_layout, switch_final_mask_to_qtilde,
+    },
+};
 use std::{
     hint::black_box,
     time::{Duration, Instant},
@@ -83,6 +88,190 @@ fn main() {
         millis(precompute_avg)
     );
     println!("  {:<24}{:>12.3}", "pack", millis(pack_avg));
+
+    bench_recursion_partial(32, 200);
+    bench_recursion_partial(64, 200);
+    bench_recursion_partial(1024, 20);
+}
+
+/// Recursion-scheme (InsPIRe², partial-pack) online packing at the production
+/// regime (n = 2048, base2k = 18, k = 54, qtilde = 2^32): the old two-step
+/// path (`pack` at full precision + `modulus_switch_to_digits`) against the
+/// fused reduced-precision path (`pack_to_qtilde` + digit balance).
+fn bench_recursion_partial(gamma: usize, iters: usize) {
+    use poulpy_core::{GLWENormalize, layouts::LWEInfos};
+
+    let n = 2048usize;
+    let module = Module::<FFT64Avx>::new(n as u64);
+    let base2k = 18usize;
+    let k_ct = 54usize;
+    let dnum = 3usize;
+    let dsize = 1usize;
+    let qtilde_bits = 32usize;
+    let baby_size = BABY_SIZE;
+    let stride = (n / 2) / gamma;
+
+    let src_infos = EncryptionLayout::new_from_default_sigma(GLWELayout {
+        n: Degree(n as u32),
+        base2k: Base2K(base2k as u32),
+        k: TorusPrecision(k_ct as u32),
+        rank: Rank(1),
+    })
+    .unwrap();
+    let matrix_infos = LWEMatrixLayout {
+        rows: gamma,
+        n: Degree(n as u32),
+        base2k: src_infos.base2k(),
+        k: src_infos.max_k(),
+    };
+    let key_infos = EncryptionLayout::new_from_default_sigma(GLWEAutomorphismKeyLayout {
+        n: Degree(n as u32),
+        base2k: Base2K(base2k as u32),
+        k: TorusPrecision(k_ct as u32),
+        rank: Rank(1),
+        dnum: dnum.into(),
+        dsize: dsize.into(),
+    })
+    .unwrap();
+    let qtilde_infos = qtilde_glwe_layout(Degree(n as u32), qtilde_bits);
+    let size = matrix_infos.size();
+    let scratch_aggregate = module.vec_znx_alloc(n, size);
+
+    let mut scratch = ScratchOwned::<FFT64Avx>::alloc(
+        module
+            .glwe_encrypt_sk_tmp_bytes(&src_infos)
+            .max(module.glwe_expand_lwe_matrix_tmp_bytes(&matrix_infos, &src_infos))
+            .max(module.pack_partial_mask_preprocessing_tmp_bytes(gamma, size))
+            .max(module.pack_keys_generate_tmp_bytes(&key_infos))
+            .max(module.gglwe_prepare_tmp_bytes(&key_infos))
+            .max(module.glwe_normalize_tmp_bytes())
+            .max(module.pack_precompute_tmp_bytes(
+                PackingPrecomputeInfos::new(n - 1, size, base2k, baby_size),
+                &scratch_aggregate,
+                &key_infos,
+            ))
+            .max(1 << 28),
+    );
+
+    let mut source_xs = Source::new([17u8; 32]);
+    let mut source_xe = Source::new([18u8; 32]);
+    let mut source_xa = Source::new([19u8; 32]);
+
+    let mut sk_lwe = module.lwe_secret_alloc(Degree(n as u32));
+    sk_lwe.fill_ternary_prob(0.5, &mut source_xs);
+    let sk_src = module.glwe_secret_from_lwe_secret(&sk_lwe);
+    let mut sk_src_prep = module.glwe_secret_prepared_alloc_from_infos(&sk_src);
+    module.glwe_secret_prepare(&mut sk_src_prep, &sk_src);
+
+    let key_partial = module.pack_partial_key_generate(
+        &key_infos,
+        &sk_lwe,
+        [23u8; 32],
+        stride,
+        &mut source_xe,
+        &mut scratch.borrow(),
+    );
+    let mut key_precomputations =
+        module.pack_partial_keys_precompute(&key_partial, stride, baby_size, &mut scratch.borrow());
+    key_precomputations.build_qtilde_keys(&module, qtilde_bits);
+
+    let data: Vec<i64> = (0..n).map(|i| (i as i64 % 7) - 3).collect();
+    let mut pt = module.glwe_plaintext_alloc_from_infos(&src_infos);
+    pt.encode_vec_i64(&data, TorusPrecision(PT_BITS as u32));
+    let mut src = module.glwe_alloc_from_infos(&src_infos);
+    module.glwe_encrypt_sk(
+        &mut src,
+        &pt,
+        &sk_src_prep,
+        &src_infos,
+        &mut source_xe,
+        &mut source_xa,
+        &mut scratch.borrow(),
+    );
+    let mut lwe_matrix = module.lwe_matrix_alloc_from_infos(&matrix_infos);
+    module.glwe_expand_lwe_matrix(&mut lwe_matrix, &src, &mut scratch.borrow());
+
+    let mut aggregate = module.vec_znx_alloc(gamma, size);
+    module.packing_partial_mask_preprocessing(
+        &mut aggregate,
+        base2k,
+        gamma,
+        lwe_matrix.mask(),
+        &mut scratch.borrow(),
+    );
+
+    let mut precompute =
+        module.pack_partial_precompute_alloc(gamma - 1, size, base2k, baby_size, stride);
+    module.pack_partial_precompute(
+        &mut precompute,
+        &aggregate,
+        &key_partial,
+        &mut scratch.borrow(),
+    );
+    switch_final_mask_to_qtilde(&module, &mut precompute, qtilde_bits, &mut scratch.borrow());
+
+    let body = {
+        use poulpy_hal::layouts::{ZnxView, ZnxViewMut, ZnxZero};
+        let mut body = module.vec_znx_alloc(1, size);
+        body.zero();
+        for limb in 0..size {
+            let src_limb = lwe_matrix.body().at(0, limb);
+            body.at_mut(0, limb)[..gamma].copy_from_slice(src_limb);
+        }
+        body
+    };
+
+    let mut packed = module.glwe_alloc_from_infos(&src_infos);
+    let mut switched = module.glwe_alloc_from_infos(&qtilde_infos);
+
+    // Old production path: full-precision pack + separate modulus switch.
+    let two_step_avg = time_average(iters, || {
+        module.pack(
+            &mut packed,
+            &body,
+            &precompute,
+            &key_precomputations,
+            CHUNK_SIZE,
+            &mut scratch.borrow(),
+        );
+        modulus_switch_to_digits(&module, &mut switched, &packed, &mut scratch.borrow());
+        black_box(&switched);
+    });
+
+    // Fused production path.
+    let fused_avg = time_average(iters, || {
+        module.pack_to_qtilde(
+            &mut switched,
+            &body,
+            &precompute,
+            &key_precomputations,
+            CHUNK_SIZE,
+            &mut scratch.borrow(),
+        );
+        balance_base2k16::<FFT64Avx>(&mut switched);
+        black_box(&switched);
+    });
+
+    println!(
+        "recursion partial-pack bench (n={}, k_ct={}, qtilde=2^{}, gamma={})",
+        n, k_ct, qtilde_bits, gamma
+    );
+    println!("  {:<24}{:>12}", "phase", "ms");
+    println!(
+        "  {:<24}{:>12.3}",
+        "pack + switch (old)",
+        millis(two_step_avg)
+    );
+    println!(
+        "  {:<24}{:>12.3}",
+        "pack_to_qtilde (fused)",
+        millis(fused_avg)
+    );
+    println!(
+        "  {:<24}{:>11.1}%",
+        "improvement",
+        100.0 * (1.0 - fused_avg.as_secs_f64() / two_step_avg.as_secs_f64())
+    );
 }
 
 struct Setup {
@@ -238,7 +427,7 @@ fn encrypt_packing_keys(
     let mut key_g = module.glwe_automorphism_key_compressed_alloc_from_infos(key_infos);
     module.glwe_automorphism_key_compressed_encrypt_sk(
         &mut key_g,
-        module.galois_element_inv(module.galois_element(1)),
+        module.galois_element(1),
         sk_base,
         key_seed,
         key_infos,

@@ -140,6 +140,27 @@ pub struct OnlinePhaseTiming {
     duration: Duration,
 }
 
+/// A nested or diagnostic ONLINE measurement.
+///
+/// Diagnostics are deliberately excluded from [`OnlineTimings::total`]: they
+/// may overlap an enclosing exclusive phase (for example, per-worker
+/// arithmetic counters inside the complete `resp2` worker-region wall time).
+#[derive(Clone, Copy, Debug)]
+pub struct OnlineDiagnosticTiming {
+    name: &'static str,
+    duration: Duration,
+}
+
+impl OnlineDiagnosticTiming {
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub fn duration(&self) -> Duration {
+        self.duration
+    }
+}
+
 impl OnlinePhaseTiming {
     pub fn name(&self) -> &'static str {
         self.name
@@ -154,6 +175,7 @@ impl OnlinePhaseTiming {
 #[derive(Default, Clone, Debug)]
 pub struct OnlineTimings {
     phases: Vec<OnlinePhaseTiming>,
+    diagnostics: Vec<OnlineDiagnosticTiming>,
     pub key_precompute: Duration,
     pub prepare_db: Duration,
     pub mask_product: Duration,
@@ -164,11 +186,22 @@ pub struct OnlineTimings {
     pub decompose: Duration,
     pub reduce_precompute: Duration,
     pub reduce: Duration,
+    /// Complete exclusive wall time of profiled worker regions. Nested worker
+    /// diagnostics are exposed through [`OnlineTimings::diagnostics`].
+    pub worker_region: Duration,
+    /// Time spent growing persistent scratch pools before online work.
+    pub pool_growth: Duration,
 }
 
 impl OnlineTimings {
     pub fn phases(&self) -> &[OnlinePhaseTiming] {
         &self.phases
+    }
+
+    /// Overlapping/nested measurements that explain an enclosing phase without
+    /// inflating [`OnlineTimings::total`].
+    pub fn diagnostics(&self) -> &[OnlineDiagnosticTiming] {
+        &self.diagnostics
     }
 
     pub fn total(&self) -> Duration {
@@ -188,10 +221,27 @@ impl OnlineTimings {
             + self.decompose
             + self.reduce_precompute
             + self.reduce
+            + self.worker_region
+            + self.pool_growth
     }
 
     pub(crate) fn record_phase(&mut self, name: &'static str, duration: Duration) {
         self.phases.push(OnlinePhaseTiming { name, duration });
+    }
+
+    pub(crate) fn record_diagnostic(&mut self, name: &'static str, duration: Duration) {
+        self.diagnostics
+            .push(OnlineDiagnosticTiming { name, duration });
+    }
+
+    pub(crate) fn add_worker_region(&mut self, name: &'static str, duration: Duration) {
+        self.worker_region += duration;
+        self.record_phase(name, duration);
+    }
+
+    pub(crate) fn add_pool_growth(&mut self, name: &'static str, duration: Duration) {
+        self.pool_growth += duration;
+        self.record_phase(name, duration);
     }
 
     pub(crate) fn add_key_precompute(&mut self, name: &'static str, duration: Duration) {
@@ -199,28 +249,8 @@ impl OnlineTimings {
         self.record_phase(name, duration);
     }
 
-    pub(crate) fn add_prepare_db(&mut self, name: &'static str, duration: Duration) {
-        self.prepare_db += duration;
-        self.record_phase(name, duration);
-    }
-
-    pub(crate) fn add_mask_product(&mut self, name: &'static str, duration: Duration) {
-        self.mask_product += duration;
-        self.record_phase(name, duration);
-    }
-
     pub(crate) fn add_body_product(&mut self, name: &'static str, duration: Duration) {
         self.body_product += duration;
-        self.record_phase(name, duration);
-    }
-
-    pub(crate) fn add_mask_prep(&mut self, name: &'static str, duration: Duration) {
-        self.mask_prep += duration;
-        self.record_phase(name, duration);
-    }
-
-    pub(crate) fn add_pack_precompute(&mut self, name: &'static str, duration: Duration) {
-        self.pack_precompute += duration;
         self.record_phase(name, duration);
     }
 
@@ -254,6 +284,12 @@ impl OnlineTimings {
                 None => self.phases.push(*p),
             }
         }
+        for d in &other.diagnostics {
+            match self.diagnostics.iter_mut().find(|e| e.name == d.name) {
+                Some(existing) => existing.duration += d.duration,
+                None => self.diagnostics.push(*d),
+            }
+        }
         self.key_precompute += other.key_precompute;
         self.prepare_db += other.prepare_db;
         self.mask_product += other.mask_product;
@@ -264,6 +300,8 @@ impl OnlineTimings {
         self.decompose += other.decompose;
         self.reduce_precompute += other.reduce_precompute;
         self.reduce += other.reduce;
+        self.worker_region += other.worker_region;
+        self.pool_growth += other.pool_growth;
     }
 }
 
@@ -343,7 +381,7 @@ impl<BE: Backend, P: Payload<[u8; 32]>> Server<BE, P> {
 }
 
 #[allow(private_bounds)]
-impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Server<BE, P>
+impl<BE: Backend<OwnedBuf = Vec<u8>, ScalarPrep = f64>, P: Payload<[u8; 32]>> Server<BE, P>
 where
     BE: poulpy_cpu_ref::reference::fft64::reim::ReimArith,
     Module<BE>: InterpolationServerModule<BE> + RecursionServerModule<BE>,

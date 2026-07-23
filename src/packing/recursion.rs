@@ -10,8 +10,11 @@ use poulpy_core::{
     layouts::{Base2K, Degree, GLWE, GLWELayout, LWEInfos, ModuleCoreAlloc, Rank, TorusPrecision},
 };
 use poulpy_hal::{
-    api::ScratchOwnedBorrow,
-    layouts::{Backend, Module, ScratchArena, ScratchOwned, VecZnx, ZnxViewMut},
+    api::{ScratchOwnedBorrow, VecZnxNormalize},
+    layouts::{
+        Backend, Module, ScratchArena, ScratchOwned, VecZnx, VecZnxToBackendMut,
+        VecZnxToBackendRef, ZnxViewMut,
+    },
 };
 
 use crate::{
@@ -20,13 +23,13 @@ use crate::{
 };
 
 /// Number of base2k=16 decomposition digits for a `qtilde`-modulus plaintext.
-pub(crate) fn decompose_digits(qtilde_bits: usize) -> usize {
+pub fn decompose_digits(qtilde_bits: usize) -> usize {
     qtilde_bits.div_ceil(16)
 }
 
 /// Modulus-switches a packed RLWE from its native modulus `q` down to
 /// `qtilde = 2^{16 * tau}` and writes the result at `base2k = 16`.
-pub(crate) fn modulus_switch_to_digits<BE>(
+pub fn modulus_switch_to_digits<BE>(
     module: &Module<BE>,
     dst: &mut GLWE<BE::OwnedBuf>,
     src: &GLWE<BE::OwnedBuf>,
@@ -39,14 +42,20 @@ pub(crate) fn modulus_switch_to_digits<BE>(
     balance_base2k16::<BE>(dst);
 }
 
-fn balance_base2k16<BE>(glwe: &mut GLWE<BE::OwnedBuf>)
+pub fn balance_base2k16<BE>(glwe: &mut GLWE<BE::OwnedBuf>)
 where
     BE: Backend<OwnedBuf = Vec<u8>>,
 {
-    let tau = glwe.data().size();
-    let cols = glwe.data().cols();
-    let n = glwe.data().n();
-    let data = glwe.data_mut();
+    balance_base2k16_data(glwe.data_mut());
+}
+
+/// Centered-digit carry pass over a base2k = 16 `VecZnx`: rebalances every
+/// digit into `[-2^15, 2^15)` so each limb reinterprets as a valid `i16`
+/// decomposition digit. Idempotent.
+pub(crate) fn balance_base2k16_data(data: &mut VecZnx<Vec<u8>>) {
+    let tau = data.size();
+    let cols = data.cols();
+    let n = data.n();
     let mut carries = vec![0i64; n];
     for col in 0..cols {
         for limb in (1..tau).rev() {
@@ -67,9 +76,47 @@ where
     }
 }
 
+/// Precomputes the `qtilde`-switched final mask consumed by the fused
+/// reduced-precision pack ([`Packing::pack_to_qtilde`]): normalizes the
+/// full-precision `final_mask` from the pack regime (`base2k`, `size` limbs)
+/// into the qtilde regime (base2k = 16, `tau` limbs) and balances its digits —
+/// exactly the switch `modulus_switch_to_digits` would apply to the mask
+/// column online, moved to precompute time. The full-precision mask is kept;
+/// other consumers (interpolation, the two-step path) are unaffected.
+pub fn switch_final_mask_to_qtilde<BE>(
+    module: &Module<BE>,
+    precompute: &mut PackingPrecomputations<BE>,
+    qtilde_bits: usize,
+    scratch: &mut ScratchArena<'_, BE>,
+) where
+    BE: Backend<OwnedBuf = Vec<u8>>,
+    Module<BE>: VecZnxNormalize<BE>,
+    VecZnx<Vec<u8>>: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE>,
+{
+    let tau = decompose_digits(qtilde_bits);
+    let mut switched = module.vec_znx_alloc(1, tau);
+    {
+        let src_ref =
+            <VecZnx<Vec<u8>> as VecZnxToBackendRef<BE>>::to_backend_ref(precompute.final_mask());
+        let mut dst_mut = <VecZnx<Vec<u8>> as VecZnxToBackendMut<BE>>::to_backend_mut(&mut switched);
+        module.vec_znx_normalize(
+            &mut dst_mut,
+            16,
+            0,
+            0,
+            &src_ref,
+            precompute.base2k(),
+            0,
+            scratch,
+        );
+    }
+    balance_base2k16_data(&mut switched);
+    precompute.set_final_mask_qtilde(switched);
+}
+
 /// Allocation layout (`base2k = 16`, `tau` limbs, rank 1) of a mod-switched,
 /// decomposed packed RLWE.
-pub(crate) fn qtilde_glwe_layout(n: Degree, qtilde_bits: usize) -> EncryptionLayout<GLWELayout> {
+pub fn qtilde_glwe_layout(n: Degree, qtilde_bits: usize) -> EncryptionLayout<GLWELayout> {
     let tau = decompose_digits(qtilde_bits);
     EncryptionLayout::new_from_default_sigma(GLWELayout {
         n,
@@ -109,10 +156,16 @@ where
     out
 }
 
-/// Parallel [`partial_pack_batch`]: each input's `pack` + modulus-switch is
-/// independent, so they run across workers, each borrowing a persistent
-/// [`ScratchOwned`] from `pool` (no per-query allocation). Output is written by
-/// index ⇒ bit-identical to the sequential order.
+/// Parallel production counterpart of [`partial_pack_batch`]: each input packs
+/// independently across workers, each borrowing a persistent [`ScratchOwned`]
+/// from `pool` (no per-query allocation). Output is written by index ⇒
+/// bit-identical to the sequential order.
+///
+/// Unlike the two-step test path, this uses the **fused** reduced-precision
+/// pack ([`Packing::pack_to_qtilde`]): the BSGS accumulation runs at the
+/// precision that survives the switch to `qtilde` and the switch itself is
+/// folded into the pack's final normalize. Every input's precompute must carry
+/// the qtilde-switched mask (see [`switch_final_mask_to_qtilde`]).
 #[allow(clippy::type_complexity)]
 pub(crate) fn partial_pack_batch_pooled<BE>(
     module: &Module<BE>,
@@ -150,15 +203,16 @@ where
             |slab, grp, sc| {
                 for (slot, w) in slab.iter_mut().zip(grp.iter()) {
                     let (precompute, body) = packed_inputs[w.panel];
-                    let mut packed = module.glwe_alloc_from_infos(src_infos);
-                    module.pack(&mut packed, body, precompute, key, 1, &mut sc.borrow());
                     let mut switched = module.glwe_alloc_from_infos(qtilde_infos);
-                    modulus_switch_to_digits::<BE>(
-                        module,
+                    module.pack_to_qtilde(
                         &mut switched,
-                        &packed,
+                        body,
+                        precompute,
+                        key,
+                        1,
                         &mut sc.borrow(),
                     );
+                    balance_base2k16::<BE>(&mut switched);
                     *slot = Some(switched);
                 }
             },

@@ -14,7 +14,8 @@ use poulpy_hal::{
         VecZnxIdftApplyTmpBytes, VecZnxNormalize, VecZnxNormalizeTmpBytes,
         VecZnxRotateAssignBackend, VecZnxRotateAssignTmpBytes, VecZnxRshAssignBackend,
         VecZnxRshTmpBytes, VecZnxTransposeBackend, VecZnxZeroBackend, VmpApplyDftToDft,
-        VmpApplyDftToDftTmpBytes, VmpPrepare, VmpPrepareTmpBytes, VmpZero,
+        VmpApplyDftToDftTmpBytes, VmpPMatFoldOutputLimbs, VmpPrepare, VmpPrepareTmpBytes,
+        VmpZero,
     },
     layouts::{Backend, GaloisElement},
 };
@@ -260,6 +261,7 @@ pub(crate) trait RecursionOnlineStepDefault<BE: Backend>:
     + VecZnxZeroBackend<BE>
     + VmpPrepare<BE>
     + VmpPrepareTmpBytes
+    + VmpPMatFoldOutputLimbs<BE>
     + VmpZero<BE>
 {
 }
@@ -282,6 +284,7 @@ where
         + VecZnxZeroBackend<BE>
         + VmpPrepare<BE>
         + VmpPrepareTmpBytes
+        + VmpPMatFoldOutputLimbs<BE>
         + VmpZero<BE>,
 {
 }

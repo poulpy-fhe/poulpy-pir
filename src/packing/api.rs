@@ -225,6 +225,27 @@ pub trait Packing<BE: Backend> {
     ) where
         R: GLWEToBackendMut<BE> + GLWEInfos,
         B: VecZnxToBackendRef<BE> + ZnxInfos;
+
+    /// Fused reduced-precision variant of [`Packing::pack`]: packs `body`
+    /// directly into the `qtilde` layout carried by `res` (base2k = 16,
+    /// `tau` limbs), accumulating only the limbs that survive the modulus
+    /// switch and folding the switch into the pack's final normalize.
+    ///
+    /// `precomputations` must carry a precomputed qtilde-switched final mask;
+    /// the caller applies the base2k = 16 centered-digit balance to `res`
+    /// afterwards. Interpolation and every other full-precision consumer keep
+    /// using [`Packing::pack`] unchanged.
+    fn pack_to_qtilde<R, B>(
+        &self,
+        res: &mut R,
+        body: &B,
+        precomputations: &PackingPrecomputations<BE>,
+        key_precomputations: &PackingKeys<BE>,
+        chunk_size: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: GLWEToBackendMut<BE> + GLWEInfos,
+        B: VecZnxToBackendRef<BE> + ZnxInfos;
 }
 
 /// Client-side generation of the two compressed automorphism keys consumed by

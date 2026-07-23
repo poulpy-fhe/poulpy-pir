@@ -4,11 +4,8 @@
 use std::time::{Duration, Instant};
 
 use poulpy_core::layouts::GLWEAutomorphismKeyCompressed;
-use poulpy_core::{
-    GLWENormalize,
-    layouts::{
-        Degree, GLWE, LWEInfos, LWEMatrix, LWEMatrixLayout, LWEMatrixToBackendMut, ModuleCoreAlloc,
-    },
+use poulpy_core::layouts::{
+    Degree, GLWE, LWEInfos, LWEMatrix, LWEMatrixLayout, LWEMatrixToBackendMut, ModuleCoreAlloc,
 };
 use poulpy_hal::{
     api::{ScratchOwnedAlloc, ScratchOwnedBorrow, VecZnxDftAutomorphismPlan},
@@ -22,7 +19,7 @@ use crate::{
     config::Collapse,
     packing::{
         Packing, PackingMaskAggregation, PackingPrecomputations,
-        recursion::{modulus_switch_to_digits, qtilde_glwe_layout},
+        recursion::{qtilde_glwe_layout, switch_final_mask_to_qtilde},
     },
     parallel::{assign_panels, num_threads_offline, scoped_workers},
     payload::Payload,
@@ -144,6 +141,7 @@ where
         let rows_per_group = self.database.rows_per_physical_group();
         let physical_rows = self.database.physical_rows();
         let torus_bits = self.params.k();
+        let qtilde = qtilde_bits(&self.params);
 
         // Phase 1 (near-free, sequential): build zero-copy `PreparedF64` **views**
         // over the contiguous plaintext DB blocks (no second copy — the DB lives in
@@ -202,6 +200,7 @@ where
                         torus_bits,
                         mask_threads,
                         key0_stride,
+                        qtilde,
                         full_pack_infos,
                         partial_res_infos,
                         shape.size,
@@ -305,11 +304,9 @@ where
         )
     }
 
-    /// Materializes only the final GLWE masks already computed by
-    /// `pack_precompute_partial`, then modulus-switches/decomposes them exactly as
-    /// [`partial_pack_batch`](crate::packing::recursion::partial_pack_batch) would
-    /// after copying the same mask into the packed result. This is the
-    /// query-independent half of first-level packing.
+    /// Materializes only the final GLWE masks of the packed results. The
+    /// qtilde-switched mask was already produced during `pack_precompute`, so
+    /// this copies it into a qtilde-layout GLWE with a zero body column.
     fn materialize_precomputed_masks(
         &self,
         precomputes: &[PackingPrecomputations<BE>],
@@ -317,22 +314,19 @@ where
         let module = self.params.module();
         let qtilde_infos =
             qtilde_glwe_layout(Degree(self.params.n() as u32), qtilde_bits(&self.params));
-        let src_infos = &self.recursion_state().src_infos;
-        let mut sc = ScratchOwned::<BE>::alloc(module.glwe_normalize_tmp_bytes());
         let mut out = Vec::with_capacity(precomputes.len());
         for precompute in precomputes {
-            let mut packed = module.glwe_alloc_from_infos(src_infos);
-            packed.data_mut().zero();
-            let mask = precompute.final_mask();
-            for limb in 0..src_infos.size() {
-                packed
+            let mut switched = module.glwe_alloc_from_infos(&qtilde_infos);
+            switched.data_mut().zero();
+            let mask = precompute
+                .final_mask_qtilde()
+                .expect("offline precompute did not switch the final mask to qtilde");
+            for limb in 0..switched.data().size() {
+                switched
                     .data_mut()
                     .at_mut(1, limb)
                     .copy_from_slice(mask.at(0, limb));
             }
-
-            let mut switched = module.glwe_alloc_from_infos(&qtilde_infos);
-            modulus_switch_to_digits(module, &mut switched, &packed, &mut sc.borrow());
             out.push(switched);
         }
         out
@@ -356,6 +350,7 @@ fn compute_l1_row_group<BE>(
     torus_bits: usize,
     mask_threads: usize,
     key0_stride: usize,
+    qtilde_bits: usize,
     full_pack_infos: &LWEMatrixLayout,
     partial_res_infos: &LWEMatrixLayout,
     size: usize,
@@ -422,6 +417,7 @@ where
             module.pack_partial_precompute_alloc(gamma0 - 1, size, base2k, baby_size, key0_stride);
         let started = Instant::now();
         module.pack_partial_precompute(&mut precompute, &aggregate, key0_mask_source, scratch);
+        switch_final_mask_to_qtilde(module, &mut precompute, qtilde_bits, &mut scratch.borrow());
         d_pack_precompute += started.elapsed();
 
         precomputes.push(precompute);

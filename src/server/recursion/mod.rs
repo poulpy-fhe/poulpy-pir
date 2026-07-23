@@ -97,6 +97,7 @@ struct PackMaskDurations {
     mask_product: Duration,
     mask_prep: Duration,
     pack_precompute: Duration,
+    worker_region: crate::parallel::WorkerRegionTimings,
 }
 
 /// Collapse-specific InsPIRe² state kept outside the common [`Server`] fields.

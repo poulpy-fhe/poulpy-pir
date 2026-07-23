@@ -4,6 +4,7 @@
 
 mod end_to_end;
 mod first_level;
+mod fused_pack;
 mod partial_pack;
 mod second_level;
 

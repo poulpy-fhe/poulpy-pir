@@ -276,6 +276,19 @@ pub unsafe trait PackingImpl<BE: Backend>: Backend {
     ) where
         R: GLWEToBackendMut<BE> + GLWEInfos,
         B: VecZnxToBackendRef<BE> + ZnxInfos;
+
+    /// Backend hook for the fused reduced-precision online packing pass.
+    fn pack_to_qtilde_impl<R, B>(
+        module: &Module<BE>,
+        res: &mut R,
+        body: &B,
+        precomputations: &PackingPrecomputations<BE>,
+        key_precomputations: &PackingKeys<BE>,
+        chunk_size: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: GLWEToBackendMut<BE> + GLWEInfos,
+        B: VecZnxToBackendRef<BE> + ZnxInfos;
 }
 
 #[allow(private_bounds)]
@@ -401,6 +414,28 @@ where
         B: VecZnxToBackendRef<BE> + ZnxInfos,
     {
         module.pack_default(
+            res,
+            body,
+            precomputations,
+            key_precomputations,
+            chunk_size,
+            scratch,
+        );
+    }
+
+    fn pack_to_qtilde_impl<R, B>(
+        module: &Module<BE>,
+        res: &mut R,
+        body: &B,
+        precomputations: &PackingPrecomputations<BE>,
+        key_precomputations: &PackingKeys<BE>,
+        chunk_size: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: GLWEToBackendMut<BE> + GLWEInfos,
+        B: VecZnxToBackendRef<BE> + ZnxInfos,
+    {
+        module.pack_to_qtilde_default(
             res,
             body,
             precomputations,

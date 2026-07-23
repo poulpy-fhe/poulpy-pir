@@ -28,6 +28,17 @@ cargo run --release --features avx512-fhe --example pir -- <preset> [batch]
 - Thread counts default to the logical-CPU count; override per phase with
   `PIR_THREADS` (base), `PIR_SETUP_THREADS`, `PIR_OFFLINE_THREADS`,
   `PIR_ONLINE_THREADS`.
+- InsPIRe² `resp2` reuses the server's warmed scratch pool by default. Set
+  `PIR_RESP2_SCRATCH=fresh` for the allocation-path A/B reference, or
+  `PIR_RESP2_SCRATCH=pooled` explicitly for the optimized path.
+- Tune its nested schedule with `PIR_RESP2_OUTER_THREADS` and
+  `PIR_RESP2_INNER_THREADS`; requested values are clamped so that
+  `outer * inner <= PIR_ONLINE_THREADS`. Useful 64-thread comparisons are
+  `2/32`, `1/64`, and `2/16`.
+
+The timing report counts the complete `recursion.resp2.worker_region` once.
+Its allocation, deallocation, scheduling, and arithmetic breakdown is printed
+separately as overlapping diagnostics and is excluded from the online total.
 
 ## Commands (InsPIRe², γ0 = 32, batch = 1)
 

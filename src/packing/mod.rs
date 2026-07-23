@@ -15,7 +15,7 @@ mod packing;
 mod packing_keys;
 mod packing_mask_preprocessing;
 mod packing_precomputations;
-pub(crate) mod recursion;
+pub mod recursion;
 
 pub use api::*;
 pub use packing_keys::*;

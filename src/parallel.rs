@@ -26,6 +26,64 @@ use poulpy_hal::{
     api::ScratchOwnedAlloc,
     layouts::{Backend, ScratchOwned},
 };
+use std::time::{Duration, Instant};
+
+/// Wall-clock diagnostics for one scoped-worker region.
+///
+/// `worker_critical` is the longest complete worker lifetime (allocation,
+/// callback, and arena destruction). `scheduling` is the part of the enclosing
+/// region that is not on that critical worker path, including spawn/join and
+/// delayed-start overhead. The component maxima are diagnostics and need not
+/// add up to `worker_critical` because they may come from different workers.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WorkerRegionTimings {
+    pub region_wall: Duration,
+    pub allocation_max: Duration,
+    pub callback_max: Duration,
+    pub deallocation_max: Duration,
+    pub worker_critical: Duration,
+    pub scheduling: Duration,
+}
+
+impl WorkerRegionTimings {
+    fn from_workers(region_wall: Duration, workers: &[WorkerTiming]) -> Self {
+        let allocation_max = workers
+            .iter()
+            .map(|w| w.allocation)
+            .max()
+            .unwrap_or_default();
+        let callback_max = workers
+            .iter()
+            .map(|w| w.callback)
+            .max()
+            .unwrap_or_default();
+        let deallocation_max = workers
+            .iter()
+            .map(|w| w.deallocation)
+            .max()
+            .unwrap_or_default();
+        let worker_critical = workers
+            .iter()
+            .map(|w| w.allocation + w.callback + w.deallocation)
+            .max()
+            .unwrap_or_default();
+        Self {
+            region_wall,
+            allocation_max,
+            callback_max,
+            deallocation_max,
+            worker_critical,
+            scheduling: region_wall.saturating_sub(worker_critical),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct WorkerTiming {
+    allocation: Duration,
+    callback: Duration,
+    deallocation: Duration,
+}
 
 /// One-time process-wide glibc malloc tuning for the parallel regions.
 ///
@@ -222,7 +280,6 @@ pub(crate) fn scoped_workers<'a, BE, T, F>(
         "output slabs must align 1:1 with work groups"
     );
     if work.len() <= 1 {
-        let f = &f;
         for (slab, group) in outputs.into_iter().zip(work.iter()) {
             let mut sc = ScratchOwned::<BE>::alloc(bytes);
             f(slab, group, &mut sc);
@@ -238,6 +295,71 @@ pub(crate) fn scoped_workers<'a, BE, T, F>(
             });
         }
     });
+}
+
+/// Profiled form of [`scoped_workers`]. The callback and arena allocation are
+/// measured independently so latency experiments can distinguish allocator
+/// work from scoped-thread scheduling without charging either to an arithmetic
+/// subphase.
+pub(crate) fn scoped_workers_profiled<'a, BE, T, F>(
+    outputs: Vec<&'a mut [T]>,
+    work: &'a [Vec<BlockWork>],
+    bytes: usize,
+    f: F,
+) -> WorkerRegionTimings
+where
+    BE: Backend,
+    ScratchOwned<BE>: ScratchOwnedAlloc<BE>,
+    T: Send,
+    F: Fn(&mut [T], &[BlockWork], &mut ScratchOwned<BE>) + Sync,
+{
+    assert_eq!(
+        outputs.len(),
+        work.len(),
+        "output slabs must align 1:1 with work groups"
+    );
+    let region = Instant::now();
+    let mut worker_timings = vec![WorkerTiming::default(); work.len()];
+    if work.len() <= 1 {
+        let f = &f;
+        for ((slab, group), timing) in outputs
+            .into_iter()
+            .zip(work.iter())
+            .zip(worker_timings.iter_mut())
+        {
+            let started = Instant::now();
+            let mut sc = ScratchOwned::<BE>::alloc(bytes);
+            timing.allocation = started.elapsed();
+            let started = Instant::now();
+            f(slab, group, &mut sc);
+            timing.callback = started.elapsed();
+            let started = Instant::now();
+            drop(sc);
+            timing.deallocation = started.elapsed();
+        }
+        return WorkerRegionTimings::from_workers(region.elapsed(), &worker_timings);
+    }
+    let f = &f;
+    std::thread::scope(|scope| {
+        for ((slab, group), timing) in outputs
+            .into_iter()
+            .zip(work.iter())
+            .zip(worker_timings.iter_mut())
+        {
+            scope.spawn(move || {
+                let started = Instant::now();
+                let mut sc = ScratchOwned::<BE>::alloc(bytes);
+                timing.allocation = started.elapsed();
+                let started = Instant::now();
+                f(slab, group, &mut sc);
+                timing.callback = started.elapsed();
+                let started = Instant::now();
+                drop(sc);
+                timing.deallocation = started.elapsed();
+            });
+        }
+    });
+    WorkerRegionTimings::from_workers(region.elapsed(), &worker_timings)
 }
 
 /// Like [`scoped_workers`], but each worker borrows a caller-owned
@@ -269,7 +391,6 @@ pub(crate) fn scoped_workers_pooled<'a, BE, T, F>(
         "scratch slabs must align 1:1 with work groups"
     );
     if work.len() <= 1 {
-        let f = &f;
         for ((slab, sc), group) in outputs.into_iter().zip(scratch).zip(work.iter()) {
             f(slab, group, sc);
         }
@@ -278,11 +399,67 @@ pub(crate) fn scoped_workers_pooled<'a, BE, T, F>(
     let f = &f;
     std::thread::scope(|scope| {
         for ((slab, sc), group) in outputs.into_iter().zip(scratch).zip(work.iter()) {
+            scope.spawn(move || f(slab, group, sc));
+        }
+    });
+}
+
+/// Profiled form of [`scoped_workers_pooled`]. Allocation is always zero; the
+/// returned scheduling gap makes the remaining scoped-thread overhead visible.
+pub(crate) fn scoped_workers_pooled_profiled<'a, BE, T, F>(
+    outputs: Vec<&'a mut [T]>,
+    scratch: Vec<&'a mut ScratchOwned<BE>>,
+    work: &'a [Vec<BlockWork>],
+    f: F,
+) -> WorkerRegionTimings
+where
+    BE: Backend,
+    ScratchOwned<BE>: Send,
+    T: Send,
+    F: Fn(&mut [T], &[BlockWork], &mut ScratchOwned<BE>) + Sync,
+{
+    assert_eq!(
+        outputs.len(),
+        work.len(),
+        "output slabs must align 1:1 with work groups"
+    );
+    assert_eq!(
+        scratch.len(),
+        work.len(),
+        "scratch slabs must align 1:1 with work groups"
+    );
+    let region = Instant::now();
+    let mut worker_timings = vec![WorkerTiming::default(); work.len()];
+    if work.len() <= 1 {
+        let f = &f;
+        for (((slab, sc), group), timing) in outputs
+            .into_iter()
+            .zip(scratch)
+            .zip(work.iter())
+            .zip(worker_timings.iter_mut())
+        {
+            let started = Instant::now();
+            f(slab, group, sc);
+            timing.callback = started.elapsed();
+        }
+        return WorkerRegionTimings::from_workers(region.elapsed(), &worker_timings);
+    }
+    let f = &f;
+    std::thread::scope(|scope| {
+        for (((slab, sc), group), timing) in outputs
+            .into_iter()
+            .zip(scratch)
+            .zip(work.iter())
+            .zip(worker_timings.iter_mut())
+        {
             scope.spawn(move || {
+                let started = Instant::now();
                 f(slab, group, sc);
+                timing.callback = started.elapsed();
             });
         }
     });
+    WorkerRegionTimings::from_workers(region.elapsed(), &worker_timings)
 }
 
 #[cfg(test)]

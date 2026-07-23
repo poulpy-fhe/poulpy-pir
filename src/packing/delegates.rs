@@ -237,4 +237,27 @@ where
             scratch,
         );
     }
+
+    fn pack_to_qtilde<R, B>(
+        &self,
+        res: &mut R,
+        body: &B,
+        precomputations: &PackingPrecomputations<BE>,
+        key_precomputations: &PackingKeys<BE>,
+        chunk_size: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: GLWEToBackendMut<BE> + GLWEInfos,
+        B: VecZnxToBackendRef<BE> + ZnxInfos,
+    {
+        BE::pack_to_qtilde_impl(
+            self,
+            res,
+            body,
+            precomputations,
+            key_precomputations,
+            chunk_size,
+            scratch,
+        );
+    }
 }

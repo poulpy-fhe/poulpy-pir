@@ -10,15 +10,21 @@ use poulpy_core::{
     ScratchArenaTakeCore,
     layouts::{
         GGLWE, GGLWEAtViewMut, GGLWEBackendRef, GGLWECompressedSeed, GGLWEInfos, GGLWELayout,
-        GGLWEPreparedFactory, GGLWEToBackendMut, GGLWEToBackendRef, GLWEAutomorphismKeyCompressed,
-        GLWESecret, GLWESecretToBackendMut, GLWEToBackendMut, GLWEToBackendRef, GetGaloisElement,
-        LWEInfos, LWESecretToBackendRef, ModuleCoreAlloc, ModuleCoreCompressedAlloc, Rank,
-        compressed::GGLWECompressedToBackendRef, prepared::GGLWEPrepared,
+        GGLWEPreparedFactory, GGLWEPreparedVmpPMatRef, GGLWEToBackendMut, GGLWEToBackendRef,
+        GLWEAutomorphismKeyCompressed, GLWESecret, GLWESecretToBackendMut, GLWEToBackendMut,
+        GLWEToBackendRef, GetGaloisElement, LWEInfos, LWESecretToBackendRef, ModuleCoreAlloc,
+        ModuleCoreCompressedAlloc, Rank, compressed::GGLWECompressedToBackendRef,
+        prepared::GGLWEPrepared,
     },
 };
 use poulpy_hal::{
-    api::{ScalarZnxAutomorphismBackend, VecZnxAutomorphismBackend, VecZnxCopyBackend},
-    layouts::{Backend, GaloisElement, Module, ScratchArena},
+    api::{
+        ScalarZnxAutomorphismBackend, VecZnxAutomorphismBackend, VecZnxCopyBackend,
+        VmpPMatAlloc, VmpPMatFoldOutputLimbs,
+    },
+    layouts::{
+        Backend, GaloisElement, Module, ScratchArena, VmpPMatOwned, VmpPMatToBackendMut,
+    },
     source::Source,
 };
 
@@ -35,6 +41,13 @@ pub struct PackingKeys<BE: Backend> {
     /// Prepared final `key_h` body key. `None` for partial packing (Algorithm 2),
     /// which has no `key_h` step.
     key_h_body: Option<GGLWEPrepared<BE::OwnedBuf, BE>>,
+    /// Reduced-precision baby `key_g` pmats for the fused qtilde pack: the
+    /// full pmat's output columns beyond the kept `out_size` are folded into
+    /// the last kept column at scale `2^-base2k` per extra limb (see
+    /// [`build_qtilde_keys`](Self::build_qtilde_keys)). Empty until built.
+    baby_key_g_qtilde: Vec<VmpPMatOwned<BE>>,
+    /// Reduced-precision `key_h` pmat (full packing only).
+    key_h_qtilde: Option<VmpPMatOwned<BE>>,
 }
 
 impl<BE: Backend> PackingKeys<BE> {
@@ -46,6 +59,8 @@ impl<BE: Backend> PackingKeys<BE> {
         Self {
             baby_key_g_bodies,
             key_h_body: Some(key_h_body),
+            baby_key_g_qtilde: Vec::new(),
+            key_h_qtilde: None,
         }
     }
 
@@ -55,6 +70,8 @@ impl<BE: Backend> PackingKeys<BE> {
         Self {
             baby_key_g_bodies,
             key_h_body: None,
+            baby_key_g_qtilde: Vec::new(),
+            key_h_qtilde: None,
         }
     }
 
@@ -77,6 +94,115 @@ impl<BE: Backend> PackingKeys<BE> {
             None => self.baby_key_g_bodies[0].size(),
         }
     }
+
+    /// Whether the reduced-precision qtilde pmats have been built.
+    pub fn has_qtilde_keys(&self) -> bool {
+        !self.baby_key_g_qtilde.is_empty()
+    }
+
+    /// Output limb count of the reduced qtilde key products.
+    pub(crate) fn qtilde_key_size(&self) -> usize {
+        self.baby_key_g_qtilde[0].size()
+    }
+
+    /// Reduced baby-step `key_g` pmat at `idx` (requires
+    /// [`build_qtilde_keys`](Self::build_qtilde_keys)).
+    pub(crate) fn baby_key_g_qtilde(&self, idx: usize) -> &VmpPMatOwned<BE> {
+        &self.baby_key_g_qtilde[idx]
+    }
+
+    /// Reduced `key_h` pmat (full packing only; requires
+    /// [`build_qtilde_keys`](Self::build_qtilde_keys)).
+    pub(crate) fn key_h_qtilde(&self) -> &VmpPMatOwned<BE> {
+        self.key_h_qtilde
+            .as_ref()
+            .expect("key_h is only available for full packing")
+    }
+}
+
+impl<BE> PackingKeys<BE>
+where
+    BE: Backend<ScalarPrep = f64>,
+    Module<BE>: VmpPMatAlloc<BE> + VmpPMatFoldOutputLimbs<BE>,
+{
+    /// Builds the reduced-precision prepared pmats consumed by the fused
+    /// qtilde pack ([`crate::packing::Packing::pack_to_qtilde`]).
+    ///
+    /// Each prepared key's `size` output columns are collapsed to
+    /// `out_size = ceil(qtilde_bits / base2k)` columns by folding every
+    /// dropped column `j >= out_size` into the last kept column at scale
+    /// `2^-(j - out_size + 1) * base2k` — in the pmat's f64 DFT domain, where
+    /// the scaling is linear and exact to f64 precision. A VMP against the
+    /// folded pmat therefore produces, in its last output limb, the exact
+    /// combined value `limb_{out_size-1} + sum_j 2^-... * limb_j` of the
+    /// full-precision product: nothing above the final rounding at
+    /// ~`2^-(out_size * base2k)` of the torus is lost, unlike naively
+    /// truncating the (unnormalized) product limbs. The IDFT then rounds the
+    /// folded limb to an integer once, adding <= 1/2 unit at
+    /// `2^-(out_size * base2k)` — orders of magnitude below the modulus
+    /// switch's own rounding noise.
+    ///
+    /// Idempotent for any `qtilde_bits` value that resolves to the same retained
+    /// limb count. When `out_size >= size`, this builds an equivalent prepared
+    /// copy so the fused path can use one uniform representation.
+    pub fn build_qtilde_keys(&mut self, module: &Module<BE>, qtilde_bits: usize) {
+        assert!(qtilde_bits >= 1, "qtilde precision must be positive");
+        let base2k = self.baby_key_g_bodies[0].base2k().as_usize();
+        let expected_size = qtilde_bits.div_ceil(base2k).min(self.key_size());
+        if self.has_qtilde_keys() {
+            assert_eq!(
+                self.qtilde_key_size(),
+                expected_size,
+                "qtilde keys were already built for a different retained limb count"
+            );
+            return;
+        }
+        self.baby_key_g_qtilde = self
+            .baby_key_g_bodies
+            .iter()
+            .map(|k| fold_prepared_pmat_to_qtilde(module, k, qtilde_bits))
+            .collect();
+        self.key_h_qtilde = self
+            .key_h_body
+            .as_ref()
+            .map(|k| fold_prepared_pmat_to_qtilde(module, k, qtilde_bits));
+    }
+}
+
+/// Folds a prepared key's pmat output columns beyond `out_size` into the last
+/// kept column (see [`PackingKeys::build_qtilde_keys`]).
+/// Prepared-layout access remains inside Poulpy's backend API.
+fn fold_prepared_pmat_to_qtilde<BE, K>(
+    module: &Module<BE>,
+    key: &K,
+    qtilde_bits: usize,
+) -> VmpPMatOwned<BE>
+where
+    BE: Backend<ScalarPrep = f64>,
+    Module<BE>: VmpPMatAlloc<BE> + VmpPMatFoldOutputLimbs<BE>,
+    K: GGLWEPreparedVmpPMatRef<BE> + GGLWEInfos,
+{
+    let src = key.vmp_pmat_backend_ref();
+    let size = src.size();
+    let base2k = key.base2k().as_usize();
+    assert!(qtilde_bits >= 1, "qtilde precision must be positive");
+    let out_size = qtilde_bits.div_ceil(base2k).min(size);
+    assert_eq!(
+        src.cols_in(),
+        1,
+        "qtilde key fold expects rank-1 input keys"
+    );
+    assert_eq!(
+        src.cols_out(),
+        1,
+        "qtilde key fold expects body-only (rank-0 output) keys"
+    );
+    let mut dst = module.vmp_pmat_alloc(src.rows(), 1, 1, out_size);
+    {
+        let mut dst_ref = dst.to_backend_mut();
+        module.vmp_pmat_fold_output_limbs(&mut dst_ref, &src, base2k);
+    }
+    dst
 }
 
 impl<BE> PackingKeysGenerate<BE> for Module<BE>

@@ -15,19 +15,21 @@ epserde = "0.13"
 # ptr_hash uses internally).
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 private-gemm-x86 = { version = "=0.1.20", default-features = false }
-# Pinned: poulpy-pir is adapted to this exact poulpy commit. Pinning isolates it
-# from poulpy `main` drift; bump the rev deliberately when migrating to a newer
-# poulpy (and update poulpy-pir to match its API).
-poulpy-core = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed" }
-poulpy-hal = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed" }
-poulpy-cpu-ref = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed", features = ["enable-core"] }
-poulpy-cpu-avx = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed", features = ["enable-avx"] }
+# The sibling Poulpy checkout is based on the production-pinned revision
+# f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed and carries the prepared-matrix
+# limb-folding HAL operation required by `pack_to_qtilde`. Keep the two changes
+# together; when the Poulpy change is published, replace these paths with its
+# new immutable revision.
+poulpy-core = { path = "../poulpy/poulpy-core" }
+poulpy-hal = { path = "../poulpy/poulpy-hal" }
+poulpy-cpu-ref = { path = "../poulpy/poulpy-cpu-ref", features = ["enable-core"] }
+poulpy-cpu-avx = { path = "../poulpy/poulpy-cpu-avx", features = ["enable-avx"] }
 # AVX-512 FHE backend (FFT64Avx512). Optional and never named in the library —
 # only the `pir` example (a run-site "binary") imports it, gated by the
 # `avx512-fhe` feature. `enable-avx512f` suffices (FFT64Avx512 needs only
 # AVX-512F). NOTE: this crate has a compile-time guard requiring
 # `RUSTFLAGS="-C target-feature=+avx512f"`, so it only *builds* on an AVX-512F host.
-poulpy-cpu-avx512 = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed", features = ["enable-avx512f"], optional = true }
+poulpy-cpu-avx512 = { path = "../poulpy/poulpy-cpu-avx512", features = ["enable-avx512f"], optional = true }
 
 [features]
 # Pulls in the optional AVX-512 FHE backend for the `pir` example.

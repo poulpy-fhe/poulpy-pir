@@ -213,6 +213,20 @@ pub trait PackingDefault<BE: Backend> {
     ) where
         R: GLWEToBackendMut<BE> + GLWEInfos,
         B: VecZnxToBackendRef<BE> + ZnxInfos;
+
+    /// Default fused reduced-precision online implementation (see
+    /// [`crate::packing::Packing::pack_to_qtilde`]).
+    fn pack_to_qtilde_default<R, B>(
+        &self,
+        res: &mut R,
+        body: &B,
+        precomputations: &PackingPrecomputations<BE>,
+        key_precomputations: &PackingKeys<BE>,
+        chunk_size: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: GLWEToBackendMut<BE> + GLWEInfos,
+        B: VecZnxToBackendRef<BE> + ZnxInfos;
 }
 
 impl<BE: Backend<OwnedBuf = Vec<u8>>> PackingMaskAggregationDefault<BE> for Module<BE>
@@ -518,6 +532,29 @@ where
         B: VecZnxToBackendRef<BE> + ZnxInfos,
     {
         packing::pack_default(
+            self,
+            res,
+            body,
+            precomputations,
+            key_precomputations,
+            chunk_size,
+            scratch,
+        )
+    }
+
+    fn pack_to_qtilde_default<R, B>(
+        &self,
+        res: &mut R,
+        body: &B,
+        precomputations: &PackingPrecomputations<BE>,
+        key_precomputations: &PackingKeys<BE>,
+        chunk_size: usize,
+        scratch: &mut ScratchArena<'_, BE>,
+    ) where
+        R: GLWEToBackendMut<BE> + GLWEInfos,
+        B: VecZnxToBackendRef<BE> + ZnxInfos,
+    {
+        packing::pack_to_qtilde_default(
             self,
             res,
             body,

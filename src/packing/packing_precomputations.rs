@@ -151,6 +151,12 @@ pub struct PackingPrecomputations<BE: Backend> {
     body_vmp_masks: VecZnx<BE::OwnedBuf>,
     /// Final GLWE mask copied into the packed result after online body work.
     final_mask: VecZnx<BE::OwnedBuf>,
+    /// `final_mask` modulus-switched to the `qtilde` regime (base2k = 16,
+    /// `tau` limbs, digits balanced to `[-2^15, 2^15)`). Present only when the
+    /// consumer packs through the fused reduced-precision path
+    /// (`pack_to_qtilde`); the full-precision `final_mask` stays authoritative
+    /// for every other consumer.
+    final_mask_qtilde: Option<VecZnx<BE::OwnedBuf>>,
     /// DFT columns derived from `body_vmp_masks` for BSGS baby-step products.
     bsgs_masks: Vec<VecZnxDft<BE::OwnedBuf, BE>>,
     /// Type-erased giant-step plans used after each baby-step group sum. Boxed
@@ -217,6 +223,18 @@ impl<BE: Backend> PackingPrecomputations<BE> {
         &self.final_mask
     }
 
+    /// The `qtilde`-switched final mask consumed by the fused
+    /// reduced-precision pack, if it has been precomputed (see
+    /// [`crate::packing::recursion::switch_final_mask_to_qtilde`]).
+    pub(crate) fn final_mask_qtilde(&self) -> Option<&VecZnx<BE::OwnedBuf>> {
+        self.final_mask_qtilde.as_ref()
+    }
+
+    /// Stores the precomputed `qtilde`-switched final mask.
+    pub(crate) fn set_final_mask_qtilde(&mut self, mask: VecZnx<BE::OwnedBuf>) {
+        self.final_mask_qtilde = Some(mask);
+    }
+
     /// Mutable access used only by the fixed-mask precompute finalization.
     fn final_mask_mut(&mut self) -> &mut VecZnx<BE::OwnedBuf> {
         &mut self.final_mask
@@ -251,6 +269,10 @@ impl<BE: Backend> PackingPrecomputations<BE> {
         f(raw.as_ptr().cast(), size_of_val(raw));
         let raw = self.final_mask.raw();
         f(raw.as_ptr().cast(), size_of_val(raw));
+        if let Some(mask) = &self.final_mask_qtilde {
+            let raw = mask.raw();
+            f(raw.as_ptr().cast(), size_of_val(raw));
+        }
         for mask in &self.bsgs_masks {
             let raw = mask.raw();
             f(raw.as_ptr().cast(), size_of_val(raw));
@@ -358,6 +380,7 @@ pub(crate) fn pack_precompute_alloc_default<BE: Backend>(
     PackingPrecomputations {
         body_vmp_masks: module.vec_znx_alloc(steps, size),
         final_mask: module.vec_znx_alloc(1, size),
+        final_mask_qtilde: None,
         bsgs_masks: Vec::new(),
         bsgs_giant_plans: Vec::new(),
         bsgs_baby_size: baby_size,
@@ -382,6 +405,7 @@ pub(crate) fn pack_precompute_alloc_partial<BE: Backend>(
     PackingPrecomputations {
         body_vmp_masks: module.vec_znx_alloc(steps, size),
         final_mask: module.vec_znx_alloc(1, size),
+        final_mask_qtilde: None,
         bsgs_masks: Vec::new(),
         bsgs_giant_plans: Vec::new(),
         bsgs_baby_size: baby_size,
