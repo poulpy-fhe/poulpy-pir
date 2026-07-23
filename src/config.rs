@@ -30,12 +30,13 @@ pub enum DefaultScheme {
 /// trade-off point). The second dimension is derived: `rows = 2^29 · db_gib /
 /// cols`, so `rows · cols` is exactly the DB's `u16`-coefficient count.
 ///
-/// [`Self::all`] enumerates the full grid — every `cols` in the per-size window
-/// ([`Self::cols_window`], anchored on the paper's Table 2 / Appendix Table 8 and
-/// log2-interpolated for the intermediate sizes) crossed with all four schemes.
-/// Use [`Self::resolve`] when the construction is selected dynamically, or
-/// [`Self::interpolation`] / [`Self::recursion`] when the caller knows the payload
-/// type. [`Self::canonical`] picks the single `rows = 2^16` shape per size (the
+/// [`Self::all`] enumerates the regular grid — every `cols` in the per-size
+/// window ([`Self::cols_window`], anchored on the paper's Table 2 / Appendix
+/// Table 8 and log2-interpolated for the intermediate sizes) crossed with all
+/// four schemes — plus selected tuned layouts. Use [`Self::resolve`] when the
+/// construction is selected dynamically, or [`Self::interpolation`] /
+/// [`Self::recursion`] when the caller knows the payload type.
+/// [`Self::canonical`] picks the single `rows = 2^16` shape per size (the
 /// historical uniform default).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DefaultPirParameters32B {
@@ -80,12 +81,12 @@ impl DefaultPirParameters32B {
     /// The power-of-two database sizes (GiB) covered by the defaults.
     pub const DB_SIZES_GIB: [usize; 6] = [1, 2, 4, 8, 16, 32];
 
-    /// Every default parameterization (108): the 27 layout shapes per scheme
-    /// crossed with the four schemes, ordered scheme-major, then by DB size, then
-    /// by ascending `cols`. Hard-coded (not generated) so the whole set is
-    /// auditable at a glance; `default_32b_grid_is_valid_and_covers_table2` checks
-    /// every entry against [`Self::cols_window`] and the paper's Table 2.
-    pub const ALL: [Self; 108] = [
+    /// Every default parameterization (109): the regular 27 layout shapes per
+    /// scheme crossed with the four schemes, plus the tuned
+    /// `InsPIRe2-g32-4GiB-c131072` layout. Entries are ordered scheme-major, then
+    /// by DB size, then by ascending `cols`. Hard-coded (not generated) so the
+    /// whole set is auditable at a glance.
+    pub const ALL: [Self; 109] = [
         // InsPIRe (interpolation)
         Self { scheme: DefaultScheme::Interpolation, db_gib: 1, cols: 4096 },
         Self { scheme: DefaultScheme::Interpolation, db_gib: 1, cols: 8192 },
@@ -156,6 +157,7 @@ impl DefaultPirParameters32B {
         Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 4, cols: 16384 },
         Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 4, cols: 32768 },
         Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 4, cols: 65536 },
+        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 4, cols: 131072 },
         Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 8, cols: 8192 },
         Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 8, cols: 16384 },
         Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 8, cols: 32768 },

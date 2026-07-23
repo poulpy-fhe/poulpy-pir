@@ -123,9 +123,19 @@ fn recursion_default_matches_paper_32_byte_payloads() {
 #[test]
 fn default_32b_grid_is_valid_and_covers_table2() {
     let all = DefaultPirParameters32B::all();
+    let tuned_4gib = DefaultPirParameters32B {
+        scheme: DefaultScheme::Recursion { gamma0: 32 },
+        db_gib: 4,
+        cols: 131072,
+    };
 
-    // 27 layout shapes (see cols_window sums) × 4 schemes.
-    assert_eq!(all.len(), 108, "grid size");
+    // 27 regular layout shapes (see cols_window sums) × 4 schemes, plus one
+    // tuned 4-GiB InsPIRe² layout.
+    assert_eq!(all.len(), 109, "grid size");
+    assert_eq!(
+        DefaultPirParameters32B::from_name("InsPIRe2-g32-4GiB-c131072"),
+        Some(tuned_4gib)
+    );
 
     // Names are unique and round-trip through from_name.
     let mut names = std::collections::BTreeSet::new();
@@ -139,10 +149,15 @@ fn default_32b_grid_is_valid_and_covers_table2() {
         assert_eq!(p.rows() * p.cols(), p.total_u16(), "{}", p.name());
         assert!(p.cols().is_power_of_two() && p.rows().is_power_of_two());
 
-        // cols lies in the size's window.
+        // cols lies in the size's regular window, except for the explicitly
+        // tuned InsPIRe2-g32-4GiB-c131072 preset.
         let (lo, hi) = DefaultPirParameters32B::cols_window(p.db_gib);
         let c = p.cols().trailing_zeros();
-        assert!((lo..=hi).contains(&c), "{}: cols 2^{c} out of window", p.name());
+        assert!(
+            (lo..=hi).contains(&c) || p == tuned_4gib,
+            "{}: cols 2^{c} out of window",
+            p.name()
+        );
 
         // Backend-free size accessors resolve and return nonzero sizes.
         assert!(p.query_bytes() > 0 && p.response_bytes() > 0, "{}", p.name());
