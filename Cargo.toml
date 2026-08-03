@@ -41,10 +41,12 @@ avx512-fhe = ["dep:poulpy-cpu-avx512"]
 # corrupts results under concurrent use — measured); the env var keeps that
 # build from spawning its 1-per-CPU spin-waiting pool, which otherwise slows
 # even non-BLAS phases (~2x on the single-threaded online path — measured).
-# build.rs probes the distro's off-path pthread directories, or set
-# `CBLAS_LIB_DIR` / `CBLAS_LIB_NAME` explicitly. Motivation: on wide-AVX-512
-# cores (Granite Rapids c8i: 3×512-bit FMA pipes) OpenBLAS's dgemm sustains
-# ~1.5-1.7× private-gemm-x86's throughput at the 2048³ PIR shape.
+# build.rs probes the distro's off-path pthread directories and fails early if
+# the optimized OpenBLAS library is missing. Set `CBLAS_LIB_DIR` /
+# `CBLAS_LIB_NAME` explicitly only for another known optimized,
+# concurrent-caller-safe CBLAS. Motivation: on wide-AVX-512 cores (Granite
+# Rapids c8i: 3×512-bit FMA pipes) OpenBLAS's dgemm sustains ~1.5-1.7×
+# private-gemm-x86's throughput at the 2048³ PIR shape.
 cblas-gemm = []
 # Pin the database pages across NUMA nodes with mbind(MPOL_INTERLEAVE) at
 # allocation (Linux/x86-64). Choose per deployment: single-query latency on

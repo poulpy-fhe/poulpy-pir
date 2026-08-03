@@ -110,6 +110,27 @@ Point `CBLAS_LIB_DIR`/`CBLAS_LIB_NAME` at another CBLAS (it must be
 concurrent-caller-safe and single-threaded per call) to swap libraries
 without touching code.
 
+### BLAS setup
+
+The `cblas-gemm` feature is intended for optimized `cblas_dgemm`, currently the
+pthread OpenBLAS build. Install the development package before enabling the
+feature:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y libopenblas-pthread-dev
+```
+
+On Debian/Ubuntu this provides `/usr/lib/x86_64-linux-gnu/openblas-pthread` and
+`libopenblas.so`. Without it, `cargo build --features cblas-gemm` fails early
+with a setup error instead of reaching a late `unable to find library
+-lopenblas` linker error.
+
+Use `CBLAS_LIB_DIR` and `CBLAS_LIB_NAME` only when deliberately pointing at
+another optimized, concurrent-caller-safe CBLAS implementation. Generic
+libraries such as `libgslcblas.so.0` may satisfy the symbol name but are not the
+optimized path this feature is for.
+
 ## Tuning multi-socket (NUMA) hosts
 
 The server is tuned with **batched throughput as the priority**. Two

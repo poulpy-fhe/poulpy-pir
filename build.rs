@@ -25,11 +25,19 @@ fn main() {
         .find(|d| std::path::Path::new(d).exists())
         .map(|d| d.to_string())
     });
-    if let Some(dir) = dir {
+    if let Some(dir) = &dir {
         println!("cargo:rustc-link-search=native={dir}");
         println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
     }
     let name = std::env::var("CBLAS_LIB_NAME").unwrap_or_else(|_| "openblas".to_string());
+    if name == "openblas" && dir.is_none() {
+        panic!(
+            "feature `cblas-gemm` requires the optimized pthread OpenBLAS \
+             development library. Install `libopenblas-pthread-dev` on \
+             Debian/Ubuntu, or set CBLAS_LIB_DIR to the directory containing \
+             libopenblas.so and CBLAS_LIB_NAME if the library has a custom name."
+        );
+    }
     println!("cargo:rustc-link-lib={name}");
     // When the linked BLAS is OpenBLAS, `CblasDgemm` pins the pool to one
     // thread per call via `openblas_set_num_threads` (the env var is read in
