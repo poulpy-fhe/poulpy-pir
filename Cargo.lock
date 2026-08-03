@@ -1136,7 +1136,6 @@ dependencies = [
  "poulpy-hal",
  "private-gemm-x86",
  "ptr_hash",
- "xxhash-rust",
 ]
 
 [[package]]

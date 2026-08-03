@@ -54,7 +54,7 @@ pub enum DefaultPirConfig32B {
 #[derive(Clone, Copy)]
 pub struct DefaultPirInterpolationParams32B {
     pub db_size_gib: usize,
-    pub config: Config<[u8; 32], U256P65535>,
+    pub config: Config<U256P65535>,
     pub layout: DatabaseLayout<U256P65535>,
 }
 
@@ -64,7 +64,7 @@ pub struct DefaultPirRecursionParams32B {
     pub gamma0: usize,
     pub gamma1: usize,
     pub gamma2: usize,
-    pub config: Config<[u8; 32], U256P65536>,
+    pub config: Config<U256P65536>,
     pub layout: DatabaseLayout<U256P65536>,
 }
 
@@ -87,117 +87,549 @@ impl DefaultPirParameters32B {
     /// every entry against [`Self::cols_window`] and the paper's Table 2.
     pub const ALL: [Self; 108] = [
         // InsPIRe (interpolation)
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 1, cols: 4096 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 1, cols: 8192 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 1, cols: 16384 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 1, cols: 32768 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 2, cols: 4096 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 2, cols: 8192 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 2, cols: 16384 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 2, cols: 32768 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 2, cols: 65536 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 4, cols: 8192 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 4, cols: 16384 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 4, cols: 32768 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 4, cols: 65536 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 8, cols: 8192 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 8, cols: 16384 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 8, cols: 32768 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 8, cols: 65536 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 8, cols: 131072 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 16, cols: 16384 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 16, cols: 32768 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 16, cols: 65536 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 16, cols: 131072 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 16, cols: 262144 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 32, cols: 32768 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 32, cols: 65536 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 32, cols: 131072 },
-        Self { scheme: DefaultScheme::Interpolation, db_gib: 32, cols: 262144 },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 1,
+            cols: 4096,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 1,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 1,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 1,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 2,
+            cols: 4096,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 2,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 2,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 2,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 2,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 4,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 4,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 4,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 4,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 8,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 8,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 8,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 8,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 8,
+            cols: 131072,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 16,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 16,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 16,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 16,
+            cols: 131072,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 16,
+            cols: 262144,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 32,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 32,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 32,
+            cols: 131072,
+        },
+        Self {
+            scheme: DefaultScheme::Interpolation,
+            db_gib: 32,
+            cols: 262144,
+        },
         // InsPIRe² γ0=16
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 1, cols: 4096 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 1, cols: 8192 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 1, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 1, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 2, cols: 4096 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 2, cols: 8192 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 2, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 2, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 2, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 4, cols: 8192 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 4, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 4, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 4, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 8, cols: 8192 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 8, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 8, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 8, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 8, cols: 131072 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 16, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 16, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 16, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 16, cols: 131072 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 16, cols: 262144 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 32, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 32, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 32, cols: 131072 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 16 }, db_gib: 32, cols: 262144 },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 1,
+            cols: 4096,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 1,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 1,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 1,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 2,
+            cols: 4096,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 2,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 2,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 2,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 2,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 4,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 4,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 4,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 4,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 8,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 8,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 8,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 8,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 8,
+            cols: 131072,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 16,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 16,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 16,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 16,
+            cols: 131072,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 16,
+            cols: 262144,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 32,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 32,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 32,
+            cols: 131072,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 16 },
+            db_gib: 32,
+            cols: 262144,
+        },
         // InsPIRe² γ0=32
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 1, cols: 4096 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 1, cols: 8192 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 1, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 1, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 2, cols: 4096 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 2, cols: 8192 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 2, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 2, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 2, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 4, cols: 8192 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 4, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 4, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 4, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 8, cols: 8192 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 8, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 8, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 8, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 8, cols: 131072 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 16, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 16, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 16, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 16, cols: 131072 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 16, cols: 262144 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 32, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 32, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 32, cols: 131072 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 32 }, db_gib: 32, cols: 262144 },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 1,
+            cols: 4096,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 1,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 1,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 1,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 2,
+            cols: 4096,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 2,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 2,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 2,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 2,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 4,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 4,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 4,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 4,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 8,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 8,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 8,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 8,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 8,
+            cols: 131072,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 16,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 16,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 16,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 16,
+            cols: 131072,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 16,
+            cols: 262144,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 32,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 32,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 32,
+            cols: 131072,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 32 },
+            db_gib: 32,
+            cols: 262144,
+        },
         // InsPIRe² γ0=64
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 1, cols: 4096 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 1, cols: 8192 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 1, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 1, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 2, cols: 4096 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 2, cols: 8192 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 2, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 2, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 2, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 4, cols: 8192 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 4, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 4, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 4, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 8, cols: 8192 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 8, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 8, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 8, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 8, cols: 131072 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 16, cols: 16384 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 16, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 16, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 16, cols: 131072 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 16, cols: 262144 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 32, cols: 32768 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 32, cols: 65536 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 32, cols: 131072 },
-        Self { scheme: DefaultScheme::Recursion { gamma0: 64 }, db_gib: 32, cols: 262144 },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 1,
+            cols: 4096,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 1,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 1,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 1,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 2,
+            cols: 4096,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 2,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 2,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 2,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 2,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 4,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 4,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 4,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 4,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 8,
+            cols: 8192,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 8,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 8,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 8,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 8,
+            cols: 131072,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 16,
+            cols: 16384,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 16,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 16,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 16,
+            cols: 131072,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 16,
+            cols: 262144,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 32,
+            cols: 32768,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 32,
+            cols: 65536,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 32,
+            cols: 131072,
+        },
+        Self {
+            scheme: DefaultScheme::Recursion { gamma0: 64 },
+            db_gib: 32,
+            cols: 262144,
+        },
     ];
 
     /// Convenience `Vec` view of [`Self::ALL`].
@@ -399,32 +831,47 @@ pub enum Collapse {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Config<B, P>
+pub struct Config<P>
 where
-    P: Payload<B>,
+    P: Payload,
 {
     pub(crate) n: usize,
     pub(crate) base2k: usize,
     pub(crate) k: usize,
     pub(crate) collapse: Collapse,
-    pub(crate) _phantom: PhantomData<(B, P)>,
+    pub(crate) _phantom: PhantomData<P>,
 }
 
-impl<B, P> Copy for Config<B, P> where P: Payload<B> {}
+impl<P> Copy for Config<P> where P: Payload {}
 
-impl<B, P> Clone for Config<B, P>
+impl<P> Clone for Config<P>
 where
-    P: Payload<B>,
+    P: Payload,
 {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<B, P> Config<B, P>
+impl<P> Config<P>
 where
-    P: Payload<B>,
+    P: Payload,
 {
+    /// A config at the library-default cryptosystem scalars ([`DEFAULT_N`],
+    /// [`DEFAULT_BASE2K`], [`DEFAULT_K`]) with the given collapse. This is the
+    /// entry point for payload types the ready-made presets do not cover (e.g.
+    /// [`crate::payload::U512P65536`]); pair it with a
+    /// [`DatabaseLayout`] of the same `P`.
+    pub const fn with_collapse(collapse: Collapse) -> Self {
+        Self {
+            n: DEFAULT_N,
+            base2k: DEFAULT_BASE2K,
+            k: DEFAULT_K,
+            collapse,
+            _phantom: PhantomData,
+        }
+    }
+
     pub fn n(&self) -> usize {
         self.n
     }
@@ -441,7 +888,7 @@ where
     }
 
     #[allow(clippy::new_ret_no_self)]
-    pub fn new<BE: Backend>(self) -> Parameters<BE, B, P>
+    pub fn new<BE: Backend>(self) -> Parameters<BE, P>
     where
         Module<BE>: ModuleNew<BE>,
     {

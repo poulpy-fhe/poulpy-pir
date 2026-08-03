@@ -23,7 +23,7 @@ impl<P> Clone for DatabaseLayout<P> {
     }
 }
 
-impl<P: Payload<[u8; 32]>> DatabaseLayout<P> {
+impl<P: Payload> DatabaseLayout<P> {
     /// Raw coefficient matrix dimensions. `rows` and `cols` are coefficient counts,
     /// not scheme-specific batch/block counts.
     pub fn new(rows: usize, cols: usize) -> Self {
@@ -137,7 +137,7 @@ impl<P: Payload<[u8; 32]>> DatabaseLayout<P> {
 
     /// Total payload capacity in bytes.
     pub fn total_payload_bytes(&self, column_height: usize) -> usize {
-        self.num_payloads(column_height) * size_of::<[u8; 32]>()
+        self.num_payloads(column_height) * size_of::<P::Block>()
     }
 
     /// The `(rows_bytes, cols_bytes)` byte-matrix shape (`cols_bytes = columns`).

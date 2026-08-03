@@ -9,7 +9,7 @@ pub struct DatabasePreprocessingConfig {
 }
 
 impl DatabasePreprocessingConfig {
-    pub fn new<P: Payload<[u8; 32]>>(column_height: usize) -> Self {
+    pub fn new<P: Payload>(column_height: usize) -> Self {
         assert!(column_height > 0, "column height must be non-zero");
         assert!(
             P::EXPONENT <= column_height,
@@ -23,7 +23,7 @@ impl DatabasePreprocessingConfig {
         self.column_height
     }
 
-    pub fn payloads_per_column<P: Payload<[u8; 32]>>(&self) -> usize {
+    pub fn payloads_per_column<P: Payload>(&self) -> usize {
         self.column_height / P::EXPONENT
     }
 }

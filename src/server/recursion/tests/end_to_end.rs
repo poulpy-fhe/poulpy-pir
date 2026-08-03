@@ -408,7 +408,8 @@ fn recursion_api_roundtrip() {
     use crate::server::Server;
     use std::marker::PhantomData;
     struct RawRecordPayload;
-    impl Payload<[u8; 32]> for RawRecordPayload {
+    impl Payload for RawRecordPayload {
+        type Block = [u8; 32];
         const BASIS: u32 = 65536;
         const EXPONENT: usize = 1;
         fn encode(_digits: &mut [i16], _a: [u8; 32]) {}
@@ -416,7 +417,7 @@ fn recursion_api_roundtrip() {
     }
     let (t, cols, gamma0) = (4usize, 64usize, 8usize);
     let num_records = t * cols;
-    let config = || Config::<[u8; 32], RawRecordPayload> {
+    let config = || Config::<RawRecordPayload> {
         n: 64,
         base2k: DEFAULT_BASE2K,
         k: DEFAULT_K,
@@ -457,7 +458,8 @@ fn recursion_api_roundtrip_larger() {
     use crate::server::Server;
     use std::marker::PhantomData;
     struct RawRecordPayload;
-    impl Payload<[u8; 32]> for RawRecordPayload {
+    impl Payload for RawRecordPayload {
+        type Block = [u8; 32];
         const BASIS: u32 = 65536;
         const EXPONENT: usize = 1;
         fn encode(_digits: &mut [i16], _a: [u8; 32]) {}
@@ -466,7 +468,7 @@ fn recursion_api_roundtrip_larger() {
     let (t, cols, gamma0, k_pt) = (8usize, 128usize, 8usize, 16usize);
     let num_records = t * cols;
     let p = 1i64 << k_pt;
-    let config = || Config::<[u8; 32], RawRecordPayload> {
+    let config = || Config::<RawRecordPayload> {
         n: 128,
         base2k: DEFAULT_BASE2K,
         k: DEFAULT_K,
@@ -522,7 +524,8 @@ fn recursion_api_roundtrip_chunked_dimensions() {
     use crate::server::Server;
     use std::marker::PhantomData;
     struct RawRecordPayload;
-    impl Payload<[u8; 32]> for RawRecordPayload {
+    impl Payload for RawRecordPayload {
+        type Block = [u8; 32];
         const BASIS: u32 = 65536;
         const EXPONENT: usize = 1;
         fn encode(_digits: &mut [i16], _a: [u8; 32]) {}
@@ -530,7 +533,7 @@ fn recursion_api_roundtrip_chunked_dimensions() {
     }
 
     let (n, t, cols, gamma0) = (64usize, 128usize, 128usize, 8usize);
-    let config = || Config::<[u8; 32], RawRecordPayload> {
+    let config = || Config::<RawRecordPayload> {
         n,
         base2k: DEFAULT_BASE2K,
         k: DEFAULT_K,

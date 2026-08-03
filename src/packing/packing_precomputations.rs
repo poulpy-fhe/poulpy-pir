@@ -54,7 +54,8 @@ pub struct PackingPrecomputeInfos {
 }
 
 impl PackingPrecomputeInfos {
-    /// Creates full-packing metadata matching [`pack_precompute_alloc_default`].
+    /// Creates full-packing metadata matching the default full-packing
+    /// precompute allocation.
     pub fn new(steps: usize, size: usize, base2k: usize, baby_size: usize) -> Self {
         Self {
             steps,

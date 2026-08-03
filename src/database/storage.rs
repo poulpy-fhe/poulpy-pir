@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use poulpy_core::layouts::ModuleCoreAlloc;
 use poulpy_hal::layouts::{Backend, Module};
 
-use crate::payload::Payload;
+use crate::payload::{Payload, PayloadBlock};
 #[cfg(feature = "numa-db-interleave")]
 use crate::{numa, parallel::num_threads_setup};
 
@@ -92,7 +92,7 @@ pub struct Database<BE: Backend, P> {
     _marker: PhantomData<(BE, P)>,
 }
 
-impl<BE: Backend, P: Payload<[u8; 32]>> Database<BE, P> {
+impl<BE: Backend, P: Payload> Database<BE, P> {
     /// The flat list of `n x n` sub-matrices (`matrix · block_cols + block`).
     pub fn matrices(&self) -> &[CoeffMatrix] {
         &self.matrices
@@ -250,7 +250,7 @@ impl<BE: Backend, P: Payload<[u8; 32]>> Database<BE, P> {
     }
 }
 
-impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Database<BE, P>
+impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload> Database<BE, P>
 where
     Module<BE>: ModuleCoreAlloc<OwnedBuf = Vec<u8>>,
 {
@@ -324,7 +324,7 @@ where
     /// touches: every payload maps to exactly one matrix, so partitioning by
     /// matrix hands each worker a disjoint set of matrices whose coefficient
     /// writes never alias. The result is identical to a sequential scatter.
-    pub fn encode_shard(&mut self, start: usize, payloads: &[[u8; 32]]) {
+    pub fn encode_shard(&mut self, start: usize, payloads: &[P::Block]) {
         let capacity = self.payload_capacity();
         let end = start
             .checked_add(payloads.len())
@@ -378,7 +378,8 @@ where
                             let row_base = local_row * column_height;
                             for pic in 0..payloads_per_column {
                                 // Payload index of column c = 0 in this row run.
-                                let base = grid_row * payloads_per_grid_row + pic * cols + block * n;
+                                let base =
+                                    grid_row * payloads_per_grid_row + pic * cols + block * n;
                                 // In-range column sub-interval within `[0, width)`.
                                 let c_lo = start.saturating_sub(base).min(width);
                                 let c_hi = end.saturating_sub(base).min(width);
@@ -401,7 +402,7 @@ where
     }
 }
 
-impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Database<BE, P> {
+impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload> Database<BE, P> {
     fn matrix_index_and_column(&self, grid_row: usize, column: usize) -> (usize, usize, usize) {
         assert!(
             grid_row < self.grid_rows,
@@ -496,7 +497,7 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Database<BE, P> {
     /// Read back the plaintext payload stored at index `i` (the decode inverse of
     /// [`encode_shard`](Self::encode_shard)). The server owns the plaintext DB, so
     /// this is the ground-truth oracle for the value a PIR query should return.
-    pub fn payload(&self, i: usize) -> [u8; 32] {
+    pub fn payload(&self, i: usize) -> P::Block {
         let digits_per = P::EXPONENT;
         let addr = self.payload_address(i);
         let digits: Vec<i16> = self
@@ -504,7 +505,7 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Database<BE, P> {
             .into_iter()
             .map(|v| v as i16)
             .collect();
-        let mut out = [0u8; 32];
+        let mut out = P::Block::zeroed();
         P::decode(&mut out, &digits);
         out
     }

@@ -118,7 +118,7 @@ fn batch_interpolation_single_element() {
 /// API must still return correct, per-query-identical responses.
 #[test]
 fn batch_recursion_fallback_matches_per_query() {
-    let config = Config::<[u8; 32], U256P65536> {
+    let config = Config::<U256P65536> {
         n: 64,
         base2k: DEFAULT_BASE2K,
         k: DEFAULT_K,

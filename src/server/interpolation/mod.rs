@@ -25,7 +25,7 @@ use crate::{
 /// fields.
 ///
 /// [`Server`]: crate::server::Server
-pub(crate) struct InterpolationState<BE: Backend, P: Payload<[u8; 32]>> {
+pub(crate) struct InterpolationState<BE: Backend, P: Payload> {
     interpolation: Interpolation,
     /// Interpolated `U` matrices (`interpolation_t` block-rows), rebuilt by `offline`.
     matrix: Database<BE, P>,

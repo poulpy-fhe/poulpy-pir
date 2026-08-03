@@ -23,7 +23,7 @@ use crate::{
     packing::PackingKeysGenerate,
     packing::recursion::qtilde_glwe_layout,
     parameters::Parameters,
-    payload::{P65535, Payload},
+    payload::{P65535, Payload, PayloadBlock},
     server::{Query, RecursionKeys, RecursionQuery, generate_recursion_key},
 };
 
@@ -34,8 +34,8 @@ use super::{
 
 /// PIR client: owns the shared [`Parameters`] (and its [`Module`]) plus its own
 /// scratch. Host backends only (`BE::OwnedBuf = Vec<u8>`).
-pub struct Client<BE: Backend, P: Payload<[u8; 32]> = P65535<[u8; 32]>> {
-    params: Parameters<BE, [u8; 32], P>,
+pub struct Client<BE: Backend, P: Payload = P65535<[u8; 32]>> {
+    params: Parameters<BE, P>,
     layout: DatabaseLayout<P>,
     scratch: ScratchOwned<BE>,
 }
@@ -79,7 +79,7 @@ where
     }
 }
 
-impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Client<BE, P>
+impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload> Client<BE, P>
 where
     Module<BE>: ModuleN
         + ModuleNew<BE>
@@ -96,7 +96,7 @@ where
     for<'b> BE::BufRef<'b>: HostDataRef,
     for<'b> BE::BufMut<'b>: HostDataMut,
 {
-    pub fn new(config: Config<[u8; 32], P>, layout: DatabaseLayout<P>) -> Self {
+    pub fn new(config: Config<P>, layout: DatabaseLayout<P>) -> Self {
         let params = config.new::<BE>();
         let scratch = ScratchOwned::<BE>::alloc(client_scratch_bytes(&params));
         Self {
@@ -107,7 +107,7 @@ where
     }
 
     /// The shared parameters (handy for callers that build reduction units).
-    pub fn params(&self) -> &Parameters<BE, [u8; 32], P> {
+    pub fn params(&self) -> &Parameters<BE, P> {
         &self.params
     }
 
@@ -360,7 +360,7 @@ where
         }
     }
 
-    pub fn decode(&mut self, response: &Response<BE>, state: &QueryState<BE>) -> [u8; 32] {
+    pub fn decode(&mut self, response: &Response<BE>, state: &QueryState<BE>) -> P::Block {
         let digits = self.decrypt_digits(response, state);
         let start = state.address().row_offset;
         let end = start + P::EXPONENT;
@@ -370,7 +370,7 @@ where
             digits.len()
         );
         let payload_digits: Vec<i16> = digits[start..end].iter().map(|&v| v as i16).collect();
-        let mut out = [0u8; 32];
+        let mut out = P::Block::zeroed();
         P::decode(&mut out, &payload_digits);
         out
     }
@@ -539,9 +539,7 @@ where
 
 /// Scratch large enough for every client operation in [`Client::begin_query`] /
 /// [`Client::decrypt`]. (The reduction's selector encryption uses its own scratch.)
-fn client_scratch_bytes<BE: Backend, P: Payload<[u8; 32]>>(
-    params: &Parameters<BE, [u8; 32], P>,
-) -> usize
+fn client_scratch_bytes<BE: Backend, P: Payload>(params: &Parameters<BE, P>) -> usize
 where
     Module<BE>: PackingKeysGenerate<BE>
         + GLWECompressedEncryptSk<BE>

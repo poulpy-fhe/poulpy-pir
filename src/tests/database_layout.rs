@@ -142,10 +142,18 @@ fn default_32b_grid_is_valid_and_covers_table2() {
         // cols lies in the size's window.
         let (lo, hi) = DefaultPirParameters32B::cols_window(p.db_gib);
         let c = p.cols().trailing_zeros();
-        assert!((lo..=hi).contains(&c), "{}: cols 2^{c} out of window", p.name());
+        assert!(
+            (lo..=hi).contains(&c),
+            "{}: cols 2^{c} out of window",
+            p.name()
+        );
 
         // Backend-free size accessors resolve and return nonzero sizes.
-        assert!(p.query_bytes() > 0 && p.response_bytes() > 0, "{}", p.name());
+        assert!(
+            p.query_bytes() > 0 && p.response_bytes() > 0,
+            "{}",
+            p.name()
+        );
 
         // Resolves, and the layout math holds (asserts fire inside on bad shapes).
         match p.resolve() {

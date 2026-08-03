@@ -429,9 +429,9 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>> Query<BE> {
 
     /// Deserialize a query written by [`Query::write_to`], sizing every buffer
     /// from `params`.
-    pub fn read_from<R: Read, P: Payload<[u8; 32]>>(
+    pub fn read_from<R: Read, P: Payload>(
         reader: &mut R,
-        params: &Parameters<BE, [u8; 32], P>,
+        params: &Parameters<BE, P>,
     ) -> Result<Self>
     where
         Module<BE>: ModuleN
@@ -542,9 +542,9 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>> Response<BE> {
 
     /// Deserialize a response written by [`Response::write_to`], sizing every
     /// buffer from `params`.
-    pub fn read_from<R: Read, P: Payload<[u8; 32]>>(
+    pub fn read_from<R: Read, P: Payload>(
         reader: &mut R,
-        params: &Parameters<BE, [u8; 32], P>,
+        params: &Parameters<BE, P>,
     ) -> Result<Self>
     where
         Module<BE>: ModuleN

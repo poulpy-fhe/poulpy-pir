@@ -161,7 +161,7 @@ fn mask_product_acc(prepared: &[Panel], masks: &[Mask], mask_threads: usize) -> 
     }
     let mut partials: Vec<Vec<f64>> = (0..nt).map(|_| vec![0.0f64; acc_len]).collect();
     std::thread::scope(|scope| {
-        for (part, range) in partials.iter_mut().zip(ranges.into_iter()) {
+        for (part, range) in partials.iter_mut().zip(ranges) {
             scope.spawn(move || accumulate_range(part, prepared, masks, range));
         }
     });

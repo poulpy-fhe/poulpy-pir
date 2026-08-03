@@ -4,16 +4,39 @@ use std::marker::PhantomData;
 pub type U256P65535 = P65535<[u8; 32]>;
 /// 256-bit payload as 16 base-65536 (`2¹⁶`) digits (InsPIRe² regime, `p = 2¹⁶`).
 pub type U256P65536 = P65536<[u8; 32]>;
+/// 512-bit payload as 32 base-65536 (`2¹⁶`) digits (InsPIRe² regime, `p = 2¹⁶`).
+pub type U512P65536 = P65536<[u8; 64]>;
+
+/// The plaintext block a [`Payload`] codec moves in and out of the digit
+/// domain. Implemented for every `[u8; N]`.
+pub trait PayloadBlock: Copy + Send + Sync {
+    /// The all-zero block. (Arrays past 32 elements do not implement
+    /// `Default`, hence this instead of a `Default` bound.)
+    fn zeroed() -> Self;
+}
+
+impl<const N: usize> PayloadBlock for [u8; N] {
+    fn zeroed() -> Self {
+        [0u8; N]
+    }
+}
 
 /// `Sync` supertrait: payloads are zero-sized type markers, so they are always
 /// `Sync`; requiring it lets `Server<BE, P>` be shared across scoped threads (the
 /// parallel batched recursion finish borrows `&Server` in worker threads).
-pub trait Payload<B>: Sync {
+///
+/// The block is an associated type (not a trait type parameter) so that
+/// downstream generics — `Server<BE, P>`, `Client<BE, P>`,
+/// `DatabaseLayout<P>` — can name it as `P::Block` without carrying a second,
+/// otherwise-unconstrained type parameter.
+pub trait Payload: Sync {
+    /// The plaintext value one payload slot stores, e.g. `[u8; 32]`.
+    type Block: PayloadBlock;
     /// Digit radix `p`. A `u32` because `2¹⁶ = 65536` does not fit a `u16`.
     const BASIS: u32;
     const EXPONENT: usize;
-    fn encode(digits: &mut [i16], a: B);
-    fn decode(a: &mut B, digits: &[i16]);
+    fn encode(digits: &mut [i16], a: Self::Block);
+    fn decode(a: &mut Self::Block, digits: &[i16]);
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -21,7 +44,8 @@ pub struct P65535<B> {
     _phantom: PhantomData<B>,
 }
 
-impl Payload<[u8; 32]> for P65535<[u8; 32]> {
+impl Payload for P65535<[u8; 32]> {
+    type Block = [u8; 32];
     const BASIS: u32 = 65535;
     const EXPONENT: usize = 17;
 
@@ -64,21 +88,30 @@ pub struct P65536<B> {
     _phantom: PhantomData<B>,
 }
 
-impl Payload<[u8; 32]> for P65536<[u8; 32]> {
+/// Base-`2¹⁶` digits are exactly the `N/2` little-endian 16-bit words of the
+/// value, so the codec is the same for every even block size — `[u8; 32]`
+/// (16 digits), `[u8; 64]` (32 digits), … A digit `∈ [0, 2¹⁶)` stored centred
+/// mod `2¹⁶` is the same bit pattern read as `i16` (so `32768 → -32768`,
+/// `65535 → -1`).
+impl<const N: usize> Payload for P65536<[u8; N]> {
+    type Block = [u8; N];
     const BASIS: u32 = 65536;
-    const EXPONENT: usize = 16;
+    const EXPONENT: usize = {
+        assert!(
+            N.is_multiple_of(2),
+            "P65536 blocks must be a whole number of 16-bit words"
+        );
+        N / 2
+    };
 
-    /// Base-`2¹⁶` digits are exactly the 16 little-endian 16-bit words of the
-    /// value. A digit `∈ [0, 2¹⁶)` stored centred mod `2¹⁶` is the same bit
-    /// pattern read as `i16` (so `32768 → -32768`, `65535 → -1`).
-    fn encode(digits: &mut [i16], value: [u8; 32]) {
+    fn encode(digits: &mut [i16], value: [u8; N]) {
         debug_assert!(digits.len() == Self::EXPONENT);
         for (i, d) in digits.iter_mut().enumerate() {
             *d = u16::from_le_bytes([value[2 * i], value[2 * i + 1]]) as i16;
         }
     }
 
-    fn decode(a: &mut [u8; 32], digits: &[i16]) {
+    fn decode(a: &mut [u8; N], digits: &[i16]) {
         debug_assert!(digits.len() == Self::EXPONENT);
         for (i, &stored) in digits.iter().enumerate() {
             a[2 * i..2 * i + 2].copy_from_slice(&(stored as u16).to_le_bytes());
@@ -183,6 +216,23 @@ mod u256_base65535_tests {
             U256P65536::decode(&mut decoded, &digits);
             assert_eq!(decoded, v, "P65536 round-trip failed for n = {n}");
         }
+    }
+
+    #[test]
+    fn u512p65536_roundtrips_all_32_words() {
+        let mut v = [0u8; 64];
+        for (i, b) in v.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(37).wrapping_add(11);
+        }
+        assert_eq!(U512P65536::EXPONENT, 32);
+        let mut digits = [0i16; U512P65536::EXPONENT];
+        U512P65536::encode(&mut digits, v);
+        // digit i is the i-th little-endian 16-bit word (centred i16).
+        assert_eq!(digits[0], u16::from_le_bytes([v[0], v[1]]) as i16);
+        assert_eq!(digits[31], u16::from_le_bytes([v[62], v[63]]) as i16);
+        let mut decoded = [0u8; 64];
+        U512P65536::decode(&mut decoded, &digits);
+        assert_eq!(decoded, v, "U512P65536 round-trip failed");
     }
 
     #[test]

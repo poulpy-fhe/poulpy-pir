@@ -1,4 +1,4 @@
-//! The minimal perfect hash function mapping ETH addresses to payload indices.
+//! The minimal perfect hash function mapping fixed-size byte keys to indices.
 
 use std::io::{Read, Result as IoResult, Write};
 
@@ -7,11 +7,9 @@ use ptr_hash::{PtrHash, PtrHashParams, bucket_fn::CubicEps, hash::Xxh3_128};
 
 use super::KeywordError;
 
-/// A 20-byte Ethereum address, the keyword this module indexes by.
-pub type EthAddress = [u8; 20];
-
 /// The concrete `ptr_hash` instantiation, pinned so that the bytes a server
-/// serializes are exactly what a client deserializes.
+/// serializes are exactly what a client deserializes. Generic over the key's
+/// byte width `N` only (a 20-byte ETH address, a 32-byte hash, …).
 ///
 /// - `CubicEps` + `Vec<u32>` remap: the `default_compact()` regime, ~2.4
 ///   bits/key on the wire.
@@ -21,11 +19,11 @@ pub type EthAddress = [u8; 20];
 ///   ceiling. It is also the hasher family that implements the `epserde` traits.
 /// - `SINGLE_PART = false`: splits construction into parts so it can run
 ///   multi-threaded, which is what makes a full rebuild over tens of millions of
-///   addresses practical.
+///   keys practical.
 /// - `REMAP = true`: makes the PHF *minimal*, i.e. indices land in `[0, n)` with
 ///   no holes. Without it the database would have to be sized to the (larger)
 ///   slot count instead of the key count.
-type Phf = PtrHash<EthAddress, CubicEps, Vec<u32>, Xxh3_128, Vec<u8>, false, true>;
+type Phf<const N: usize> = PtrHash<[u8; N], CubicEps, Vec<u32>, Xxh3_128, Vec<u8>, false, true>;
 
 /// Construction parameters, tuned for wire size at the 32 M-key ceiling.
 ///
@@ -47,7 +45,7 @@ type Phf = PtrHash<EthAddress, CubicEps, Vec<u32>, Xxh3_128, Vec<u8>, false, tru
 /// `Vec<u32>` is the only remap that works.
 ///
 /// So the remap is shrunk by raising `alpha` instead. Measured over 32 M random
-/// 20-byte addresses (`lambda = 3.9` throughout):
+/// 20-byte keys (`lambda = 3.9` throughout):
 ///
 /// ```text
 ///   alpha    bits/key   size     build
@@ -67,23 +65,27 @@ type Phf = PtrHash<EthAddress, CubicEps, Vec<u32>, Xxh3_128, Vec<u8>, false, tru
 /// surfaces as [`KeywordError::MphfConstruction`] rather than a panic. If that
 /// ever fires, step `alpha` back down — it costs only wire size.
 fn params() -> PtrHashParams<CubicEps> {
-    PtrHashParams { alpha: 0.998, ..PtrHashParams::default_compact() }
+    PtrHashParams {
+        alpha: 0.998,
+        ..PtrHashParams::default_compact()
+    }
 }
 
-/// A minimal perfect hash from a fixed set of ETH addresses onto `[0, len())`.
+/// A minimal perfect hash from a fixed set of `N`-byte keys onto `[0, len())`.
 ///
 /// Built once by the server over the whole key set, then shipped to clients as
 /// opaque parameters via [`KeywordIndex::write_to`]. Both sides then agree on
-/// where each address's record lives without the client ever seeing the key set.
+/// where each key's record lives without the client ever seeing the key set.
 ///
-/// Remember that [`index`](Self::index) is total: it answers for addresses that
-/// were never in the set too. Validating the answer is [`super::Record`]'s job.
-pub struct KeywordIndex {
-    phf: Phf,
+/// Remember that [`index`](Self::index) is total: it answers for keys that were
+/// never in the set too — validating whatever the index leads to against the
+/// queried key is the caller's job (see the module docs).
+pub struct KeywordIndex<const N: usize> {
+    phf: Phf<N>,
     n: usize,
 }
 
-impl KeywordIndex {
+impl<const N: usize> KeywordIndex<N> {
     /// Builds the MPHF over `keys`.
     ///
     /// The keys must be pairwise distinct — an MPHF is not defined otherwise —
@@ -91,7 +93,7 @@ impl KeywordIndex {
     /// [`KeywordError::DuplicateKey`] rather than letting construction spin.
     /// Construction itself is multi-threaded (rayon) and roughly linear in the
     /// key count.
-    pub fn build(keys: &[EthAddress]) -> Result<Self, KeywordError> {
+    pub fn build(keys: &[[u8; N]]) -> Result<Self, KeywordError<N>> {
         if let Some(dup) = first_duplicate(keys) {
             return Err(KeywordError::DuplicateKey(dup));
         }
@@ -99,19 +101,19 @@ impl KeywordIndex {
         Ok(Self { phf, n: keys.len() })
     }
 
-    /// The payload index of `key`, always in `[0, len())`.
+    /// The index of `key`, always in `[0, len())`.
     ///
     /// For a key in the build set this is its unique slot. For any other key it
-    /// is an arbitrary but valid slot belonging to some *other* account — the
-    /// caller must verify the retrieved record against `key` (see
-    /// [`super::Record::decode`]) before trusting the value.
+    /// is an arbitrary but valid slot belonging to some *other* key — the
+    /// caller must verify whatever the index resolves to against `key` before
+    /// trusting it.
     #[inline]
-    pub fn index(&self, key: &EthAddress) -> usize {
+    pub fn index(&self, key: &[u8; N]) -> usize {
         self.phf.index(key)
     }
 
-    /// The number of keys the MPHF was built over, and hence the number of
-    /// database payload slots it addresses.
+    /// The number of keys the MPHF was built over, and hence the size of the
+    /// index range it addresses.
     pub fn len(&self) -> usize {
         self.n
     }
@@ -123,14 +125,13 @@ impl KeywordIndex {
     /// Serializes the MPHF parameters — this is the blob the client downloads.
     ///
     /// A `u64` key count precedes the `ptr_hash` payload, matching the length
-    /// prefixing used elsewhere on the wire (see [`crate::serialization`]) and
-    /// letting the reader restore `len()` without walking the structure.
+    /// prefixing used elsewhere on the wire and letting the reader restore
+    /// `len()` without walking the structure.
     pub fn write_to<W: Write>(&self, writer: &mut W) -> IoResult<()> {
         writer.write_all(&(self.n as u64).to_le_bytes())?;
         // SAFETY: `Phf` derives `Epserde`; serializing an owned, fully
         // initialized value only reads its fields.
-        unsafe { self.phf.serialize(writer) }
-            .map_err(std::io::Error::other)?;
+        unsafe { self.phf.serialize(writer) }.map_err(std::io::Error::other)?;
         Ok(())
     }
 
@@ -146,7 +147,10 @@ impl KeywordIndex {
         // rejects a mismatch.
         let phf = unsafe { Phf::deserialize_full(reader) }
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        Ok(Self { phf, n: u64::from_le_bytes(n) as usize })
+        Ok(Self {
+            phf,
+            n: u64::from_le_bytes(n) as usize,
+        })
     }
 }
 
@@ -154,8 +158,8 @@ impl KeywordIndex {
 ///
 /// Sorts a copy rather than building a hash set: at the tens-of-millions scale
 /// this module targets, the sort is both faster and far lighter on memory than
-/// a `HashSet<[u8; 20]>`, and it is a rounding error next to MPHF construction.
-fn first_duplicate(keys: &[EthAddress]) -> Option<EthAddress> {
+/// a `HashSet<[u8; N]>`, and it is a rounding error next to MPHF construction.
+fn first_duplicate<const N: usize>(keys: &[[u8; N]]) -> Option<[u8; N]> {
     let mut sorted = keys.to_vec();
     sorted.sort_unstable();
     sorted.windows(2).find(|w| w[0] == w[1]).map(|w| w[0])

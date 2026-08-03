@@ -169,9 +169,9 @@ fn pin_blas_single_threaded() {
 unsafe extern "C" {
     /// Standard CBLAS signature (row-major supported via `layout = 101`).
     fn cblas_dgemm(
-        layout: i32,    // 101 = CblasRowMajor
-        trans_a: i32,   // 111 = CblasNoTrans
-        trans_b: i32,   // 111 = CblasNoTrans
+        layout: i32,  // 101 = CblasRowMajor
+        trans_a: i32, // 111 = CblasNoTrans
+        trans_b: i32, // 111 = CblasNoTrans
         m: i32,
         n: i32,
         k: i32,
@@ -425,8 +425,8 @@ unsafe fn gemv_i16_f64_add_avx512(
             }
             j += 1;
         }
-        for k in 0..8 {
-            unsafe { *accp.add(i + k) += s[k] };
+        for (k, sum) in s.iter().enumerate() {
+            unsafe { *accp.add(i + k) += *sum };
         }
         i += 8;
     }

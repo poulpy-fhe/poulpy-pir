@@ -36,7 +36,7 @@ use crate::{
 use super::{PackMaskPhaseNames, RecursionOfflineShape, RecursionPrecomputation, qtilde_bits, tau};
 
 #[allow(private_bounds)]
-impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Server<BE, P>
+impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload> Server<BE, P>
 where
     BE: poulpy_cpu_ref::reference::fft64::reim::ReimArith,
     Module<BE>: RecursionServerModule<BE>,

@@ -27,7 +27,7 @@ use crate::packing::PackingKeysGenerate;
 /// Owned user-key-side precomputations used by packing.
 ///
 /// This is the current concrete key-precompute container. It is produced by
-/// [`Packing::pack_keys_precompute`] from the full `key_g`/`key_h` switching
+/// `Packing::pack_keys_precompute` from the full `key_g`/`key_h` switching
 /// keys and contains no seed-derived mask material.
 pub struct PackingKeys<BE: Backend> {
     /// Prepared baby-step `key_g` body keys indexed by baby step.

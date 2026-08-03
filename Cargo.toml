@@ -11,9 +11,6 @@ getrandom = "0.4"
 # serialize the MPHF parameters for the client to download.
 ptr_hash = { version = "2.0.2", default-features = false, features = ["epserde"] }
 epserde = "0.13"
-# Key tags in `src/keyword/record.rs` (XXH3-128, domain-separated from the hash
-# ptr_hash uses internally).
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
 private-gemm-x86 = { version = "=0.1.20", default-features = false }
 # Pinned: poulpy-pir is adapted to this exact poulpy commit. Pinning isolates it
 # from poulpy `main` drift; bump the rev deliberately when migrating to a newer

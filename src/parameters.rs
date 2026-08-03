@@ -99,17 +99,17 @@ impl ResponseSize {
 /// by reference everywhere; it is the single source of truth for dimensions and
 /// layouts. The shared cryptosystem lives directly on the struct; the
 /// second-dimension reduction is the [`Collapse`] enum.
-pub struct Parameters<BE: Backend, B, P>
+pub struct Parameters<BE: Backend, P>
 where
-    P: Payload<B>,
+    P: Payload,
 {
-    pub(crate) params: Config<B, P>,
+    pub(crate) params: Config<P>,
     pub(crate) module: Module<BE>,
 }
 
-impl<BE: Backend, B, P> Parameters<BE, B, P>
+impl<BE: Backend, P> Parameters<BE, P>
 where
-    P: Payload<B>,
+    P: Payload,
 {
     /// The backend module (ring degree `n`), instantiated once.
     pub fn module(&self) -> &Module<BE> {
@@ -141,11 +141,11 @@ where
         P::EXPONENT
     }
 
-    pub fn encode(&self, digits: &mut [i16], value: B) {
+    pub fn encode(&self, digits: &mut [i16], value: P::Block) {
         P::encode(digits, value)
     }
 
-    pub fn decode(&self, value: &mut B, digits: &[i16]) {
+    pub fn decode(&self, value: &mut P::Block, digits: &[i16]) {
         P::decode(value, digits)
     }
 
@@ -272,19 +272,13 @@ where
 
     /// Actual serialized query size for `layout`, counted in bytes. Backend-free;
     /// forwards to [`Config::query_size`].
-    pub fn query_size(&self, layout: DatabaseLayout<P>) -> QuerySize
-    where
-        P: Payload<[u8; 32]>,
-    {
+    pub fn query_size(&self, layout: DatabaseLayout<P>) -> QuerySize {
         self.params.query_size(layout)
     }
 
     /// Actual serialized response size for `layout`, counted in bytes.
     /// Backend-free; forwards to [`Config::response_size`].
-    pub fn response_size(&self, layout: DatabaseLayout<P>) -> ResponseSize
-    where
-        P: Payload<[u8; 32]>,
-    {
+    pub fn response_size(&self, layout: DatabaseLayout<P>) -> ResponseSize {
         self.params.response_size(layout)
     }
 }
@@ -294,9 +288,9 @@ where
 /// here and [`Parameters`] forwards to them. This lets callers that only have a
 /// `Config` (e.g. [`crate::config::DefaultPirParameters32B`]) size a query /
 /// response without instantiating a backend.
-impl<B, P> Config<B, P>
+impl<P> Config<P>
 where
-    P: Payload<B>,
+    P: Payload,
 {
     /// Pack / repacking-key regime base2k (3x18).
     pub const fn base2k(&self) -> usize {
@@ -336,10 +330,7 @@ where
     }
 
     /// Actual serialized query size for `layout`, counted in bytes.
-    pub fn query_size(&self, layout: DatabaseLayout<P>) -> QuerySize
-    where
-        P: Payload<[u8; 32]>,
-    {
+    pub fn query_size(&self, layout: DatabaseLayout<P>) -> QuerySize {
         match self.collapse() {
             Collapse::Interpolation => {
                 let one_hot_blocks = layout.column_blocks(self.n());
@@ -378,10 +369,7 @@ where
     /// Actual serialized response size, counted in bytes. The size depends only
     /// on the cryptosystem scalars and collapse (not the DB shape), so `_layout`
     /// is unused; it is kept for signature symmetry with [`Self::query_size`].
-    pub fn response_size(&self, _layout: DatabaseLayout<P>) -> ResponseSize
-    where
-        P: Payload<[u8; 32]>,
-    {
+    pub fn response_size(&self, _layout: DatabaseLayout<P>) -> ResponseSize {
         match self.collapse() {
             Collapse::Interpolation => ResponseSize {
                 tag: U8_BYTES,

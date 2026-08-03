@@ -220,7 +220,7 @@ where
 
         let mut plaintext: GLWEPlaintext<BE::OwnedBuf> =
             module.glwe_plaintext_alloc_from_infos(glwe_infos);
-        encoder.encode_vec_i64(&mut plaintext.data, BASE2K, 0, &values);
+        encoder.encode_vec_i64(plaintext.data_mut(), BASE2K, 0, &values);
 
         let mut ct = module.glwe_alloc_from_infos(glwe_infos);
         module.glwe_encrypt_sk(
