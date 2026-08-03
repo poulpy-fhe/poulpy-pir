@@ -62,6 +62,13 @@ name = "pir"
 path = "examples/pir.rs"
 required-features = ["avx512-fhe"]
 
+# Keyword PIR (lookup by ETH address through the MPHF in `src/keyword`).
+# Defaults to the always-available AVX2 backend (FFT64Avx); add
+# `--features avx512-fhe` to run it on FFT64Avx512.
+[[example]]
+name = "key_word_pir"
+path = "examples/key_word_pir.rs"
+
 [[bench]]
 name = "packing"
 path = "benches/packing/main.rs"
