@@ -38,7 +38,7 @@ use crate::{
 use super::{InterpolationPrecomputation, InterpolationState};
 
 #[allow(private_bounds)]
-impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Server<BE, P>
+impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload> Server<BE, P>
 where
     BE: poulpy_cpu_ref::reference::fft64::reim::ReimArith,
     Module<BE>: InterpolationServerModule<BE>,
@@ -51,10 +51,7 @@ where
     for<'b> BE::BufMut<'b>: HostDataMut,
 {
     /// Build the shared server with interpolation-specific state.
-    pub(crate) fn new_interpolation(
-        params: Parameters<BE, [u8; 32], P>,
-        layout: DatabaseLayout<P>,
-    ) -> Self {
+    pub(crate) fn new_interpolation(params: Parameters<BE, P>, layout: DatabaseLayout<P>) -> Self {
         assert!(
             matches!(params.collapse(), Collapse::Interpolation),
             "params must use the interpolation collapse"
@@ -131,9 +128,7 @@ where
 }
 
 /// Scratch large enough for every server operation.
-pub(super) fn server_scratch_bytes<BE: Backend, P: Payload<[u8; 32]>>(
-    params: &Parameters<BE, [u8; 32], P>,
-) -> usize
+pub(super) fn server_scratch_bytes<BE: Backend, P: Payload>(params: &Parameters<BE, P>) -> usize
 where
     Module<BE>: ModuleN
         + ModuleCoreAlloc<OwnedBuf = Vec<u8>>

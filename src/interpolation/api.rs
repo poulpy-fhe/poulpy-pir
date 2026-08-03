@@ -30,7 +30,7 @@ pub trait MonomialInterpolation<BE: Backend> {
     /// # Layout
     /// Every `y_k` must have `n` equal to the module degree, `cols == 1`, and the
     /// same `size`. Operates in-place and uses one extra polynomial of scratch
-    /// (see [`interpolate_tmp_bytes`]).
+    /// (see [`monomial_interpolate_tmp_bytes`](Self::monomial_interpolate_tmp_bytes)).
     fn monomial_interpolate<Y>(&self, y: &mut [Y], col: usize, scratch: &mut ScratchArena<'_, BE>)
     where
         Y: VecZnxToBackendMut<BE> + VecZnxToBackendRef<BE> + ZnxInfos;

@@ -20,7 +20,7 @@ use poulpy_hal::layouts::Backend;
 ///
 /// Each `coeffs[k]` is the GLWE form of the `k`-th interpolated coefficient
 /// `t · c_k` of `h(Z) = Σ_k c_k · Z^k`, produced by collapsing the matching
-/// `interp[k]` LWEMatrix. The Horner evaluation [`Self::horner`] selects one
+/// `interp[k]` LWEMatrix. The Horner evaluation selects one
 /// matrix by evaluating `h` at the GGSW-encrypted root `X^i`.
 pub struct HornerCoeffs<'a, G>(pub &'a [G]);
 

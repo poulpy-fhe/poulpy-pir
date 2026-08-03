@@ -6,7 +6,8 @@
 //! - **InsPIRe** uses `column_height = n`, so `block_rows = rows / n`.
 //! - **InsPIRe²** gets `γ0` from `Collapse::Recursion`, so `t = rows / γ0`.
 //!
-//! Payloads are generic via [`Payload`]: a payload (here `[u8; 32]`) packs into
+//! Payloads are generic via [`Payload`]: a payload block (`P::Block`, e.g.
+//! `[u8; 32]` or `[u8; 64]`) packs into
 //! `P::EXPONENT` consecutive coefficient rows of one column, each a centred-`i16`
 //! base-`P::BASIS` digit. [`Database`] holds the InsPIRe `n × n` `i16` matrices;
 //! `base2k` is a coefficient-storage detail supplied at [`DatabaseLayout::instantiate`].

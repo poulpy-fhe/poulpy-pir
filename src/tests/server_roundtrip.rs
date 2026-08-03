@@ -4,7 +4,10 @@ use poulpy_cpu_avx::FFT64Avx;
 
 use crate::{
     client::{Client, Response},
-    config::{Collapse, Config, DEFAULT_BASE2K, DEFAULT_K, DEFAULT_N, DefaultPirParameters32B, DefaultScheme},
+    config::{
+        Collapse, Config, DEFAULT_BASE2K, DEFAULT_K, DEFAULT_N, DefaultPirParameters32B,
+        DefaultScheme,
+    },
     database::DatabaseLayout,
     payload::{U256P65535, U256P65536},
     server::Server,
@@ -20,7 +23,7 @@ type Layout = DatabaseLayout<U256P65535>;
 // Full n=2048 FHE end-to-end: run the test suite with `--release`.
 #[test]
 fn server_client_roundtrip_interpolation_generic_u256_chunked() {
-    let config = Config::<[u8; 32], U256P65535> {
+    let config = Config::<U256P65535> {
         n: DEFAULT_N,
         base2k: DEFAULT_BASE2K,
         k: DEFAULT_K,
@@ -97,7 +100,7 @@ fn server_client_roundtrip_full_u256() {
 
 #[test]
 fn server_client_roundtrip_recursion_generic_u256_chunked() {
-    let config = Config::<[u8; 32], U256P65536> {
+    let config = Config::<U256P65536> {
         n: 64,
         base2k: DEFAULT_BASE2K,
         k: DEFAULT_K,

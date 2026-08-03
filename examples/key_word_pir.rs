@@ -1,29 +1,24 @@
 //! Keyword PIR driver: retrieve a 64-byte record — the full ETH address plus
-//! its full 256-bit token balance — with a **single** PIR query per lookup.
+//! its full 256-bit token balance — with a single PIR query per lookup.
 //!
 //! The keyword layer (`poulpy_pir::keyword`) contributes exactly one thing
 //! here: a minimal perfect hash function (MPHF, ~2.1 bits/key) mapping each of
-//! the 16 M addresses to a record number `r ∈ [0, 16 M)`. Everything else —
-//! the record layout and its verification — is this application's own scheme.
-//!
-//! ## One query, 64 bytes
-//!
-//! A query encrypts only the *column* selector; the row offset within the
-//! selected column never leaves the client. The response therefore carries the
-//! entire logical column — `γ0 × 16` bits (64 B at `γ0 = 32`) for InsPIRe²,
-//! `n` digits for InsPIRe — and `Client::decrypt_digits` exposes all of it.
-//! So a 64-byte record costs one query as long as both of its 32-byte payload
-//! slots live in the *same* column. Payload indices are column-minor
-//! (`column = index % cols`), so the co-located pair is `i` and `i + cols`,
-//! not `i` and `i + 1`:
+//! the 16 M addresses to a record index `i ∈ [0, 16 M)`. The module is generic
+//! over `[u8; N]` keys and knows nothing about payloads; this application
+//! instantiates it at `N = 20` and stores each record as **one**
+//! [`U512P65536`] payload:
 //!
 //! ```text
-//!   slot base(r)         address, zero-padded to 32 B   (row offset 0)
-//!   slot base(r) + cols  token balance, little-endian u256 (row offset 16)
+//!   payload[0..32]   address, zero-padded to 32 B
+//!   payload[32..64]  token balance, little-endian u256
 //! ```
 //!
-//! The address slot doubles as the in-set check: an address the MPHF never saw
-//! still resolves to *some* valid record, but that record's address slot
+//! With one payload per record the MPHF index is the payload index — no
+//! placement math — and `Client::decode` returns the whole `[u8; 64]` block
+//! from one response.
+//!
+//! The address half doubles as the in-set check: an address the MPHF never saw
+//! still resolves to *some* valid record, but that record's address bytes
 //! cannot match the queried address, so the client reports "not in set"
 //! instead of trusting an unrelated balance. (Storing the full address rather
 //! than a hash tag makes the check exact.)
@@ -32,9 +27,10 @@
 //! cargo run --release --example key_word_pir [-- <preset> [batch]]
 //! ```
 //!
-//! - `<preset>` — a [`DefaultPirParameters32B`] name (default
-//!   `InsPIRe2-g32-1GiB-c32768`); any 1 GiB-or-larger preset whose column
-//!   holds a whole record (`γ0 ≥ 32` for InsPIRe²; any InsPIRe preset).
+//! - `<preset>` — an InsPIRe² [`DefaultPirParameters32B`] name with `γ0 ≥ 32`
+//!   (default `InsPIRe2-g32-1GiB-c32768`). The preset supplies the database
+//!   geometry and collapse; the payload type is this example's `U512P65536`,
+//!   so the byte capacity is identical, grouped as 64 B records.
 //! - `[batch]` — address lookups (one query each) answered together per
 //!   online batch (default 1).
 //!
@@ -50,10 +46,10 @@ use std::time::Instant;
 
 use poulpy_pir::{
     client::Client,
-    config::{Config, DefaultPirConfig32B, DefaultPirParameters32B},
+    config::{Config, DefaultPirParameters32B, DefaultScheme},
     database::DatabaseLayout,
-    keyword::{EthAddress, KeywordIndex},
-    payload::Payload,
+    keyword::KeywordIndex,
+    payload::{Payload, U512P65536},
     server::Server,
 };
 
@@ -64,8 +60,11 @@ type BE = poulpy_cpu_avx512::FFT64Avx512;
 #[cfg(not(feature = "avx512-fhe"))]
 type BE = poulpy_cpu_avx::FFT64Avx;
 
-/// Payload slots per record: one for the address, one for the balance.
-const SLOTS_PER_RECORD: usize = 2;
+/// The payload codec: one 64-byte block = (32 B address, 32 B balance).
+type P = U512P65536;
+/// The application key: a 20-byte ETH address.
+type Address = [u8; 20];
+
 /// Size of the key set the MPHF is built over.
 const NUM_ADDRESSES: usize = 16_000_000;
 /// Which of the 16 M addresses the first lookup of the batch retrieves.
@@ -93,6 +92,16 @@ fn main() {
         eprintln!("unknown preset {name:?}\n");
         usage();
     };
+    // `P::EXPONENT` = 32 digits: a 64 B record needs a recursion column of at
+    // least γ0 = 32 (interpolation would need a base-65535 codec for 64 B,
+    // which the library does not provide).
+    match preset.scheme {
+        DefaultScheme::Recursion { gamma0 } if gamma0 >= P::EXPONENT => {}
+        _ => {
+            eprintln!("preset {name:?} cannot hold a 64 B record per column\n");
+            usage();
+        }
+    }
     let batch: usize = match cli.next() {
         None => 1,
         Some(s) => match s.parse() {
@@ -106,57 +115,32 @@ fn main() {
 
     println!("preset                       : {}", preset.name());
     println!("addresses                    : {NUM_ADDRESSES} (64 B records, 1 query each)");
-    match preset.resolve() {
-        DefaultPirConfig32B::Interpolation(p) => run(p.config, p.layout, batch),
-        DefaultPirConfig32B::Recursion(p) => run(p.config, p.layout, batch),
-    }
+    let config = Config::<P>::with_collapse(preset.collapse());
+    let layout = DatabaseLayout::<P>::new(preset.rows(), preset.cols());
+    run(config, layout, batch);
 }
 
 fn usage() -> ! {
     eprintln!("usage: key_word_pir [preset] [batch]\n");
-    eprintln!("  [preset]  one of the DefaultPirParameters32B names below (default {DEFAULT_PRESET})");
+    eprintln!(
+        "  [preset]  an InsPIRe² preset with γ0 ≥ 32 from the list below (default {DEFAULT_PRESET})"
+    );
     eprintln!("  [batch]   address lookups answered together per online batch (default 1)\n");
     eprintln!("available presets:");
     for preset in DefaultPirParameters32B::ALL {
-        eprintln!("  {}", preset.name());
+        if matches!(preset.scheme, DefaultScheme::Recursion { gamma0 } if gamma0 >= P::EXPONENT) {
+            eprintln!("  {}", preset.name());
+        }
     }
     std::process::exit(2);
 }
 
-/// Maps record number `r` to the payload index of its *first* slot; slot `k`
-/// of the record is `record_base(..) + k * cols`, which `address_for` places
-/// in the same `(matrix, column)` at row offset `k · P::EXPONENT` past the
-/// first slot — the co-location that makes one query retrieve the whole
-/// record.
-fn record_base(r: usize, cols: usize, payloads_per_column: usize) -> usize {
-    let records_per_column = payloads_per_column / SLOTS_PER_RECORD;
-    let per_band = cols * records_per_column;
-    let band = r / per_band;
-    let sub = (r % per_band) / cols;
-    let col = r % cols;
-    band * payloads_per_column * cols + (SLOTS_PER_RECORD * sub) * cols + col
-}
-
-fn run<P>(config: Config<[u8; 32], P>, layout: DatabaseLayout<P>, batch: usize)
-where
-    P: Payload<[u8; 32]>,
-{
+fn run(config: Config<P>, layout: DatabaseLayout<P>, batch: usize) {
     let column_height = config.column_height();
-    let cols = layout.cols();
-    let payloads_per_column = layout.payloads_per_column(column_height);
-    assert!(
-        payloads_per_column >= SLOTS_PER_RECORD,
-        "one column holds {payloads_per_column} payload slot(s), a 64 B record needs \
-         {SLOTS_PER_RECORD} (pick γ0 ≥ 32 for InsPIRe² presets)"
-    );
-    let records_per_column = payloads_per_column / SLOTS_PER_RECORD;
-    let record_capacity = layout.num_records(column_height) * records_per_column;
+    let record_capacity = layout.num_payloads(column_height);
     println!("collapse                     : {:?}", config.collapse());
     println!("ring degree n                : {}", config.n());
-    println!(
-        "record capacity              : {record_capacity} x 64 B ({} payload slots)\n",
-        layout.num_payloads(column_height)
-    );
+    println!("record capacity              : {record_capacity} x 64 B\n");
     assert!(
         NUM_ADDRESSES <= record_capacity,
         "{NUM_ADDRESSES} records exceed the database capacity of {record_capacity}"
@@ -182,7 +166,7 @@ where
     println!("address generation           : {:?}", t.elapsed());
 
     // ---- SERVER: derive the MPHF over the whole key set. This is the batch
-    // job that fixes every account's record number.
+    // job that fixes every account's record index.
     let t = Instant::now();
     let index = KeywordIndex::build(&keys).expect("MPHF construction");
     println!("MPHF build                   : {:?}", t.elapsed());
@@ -191,24 +175,21 @@ where
     // the key set. Round-trip through the real serialization to model that.
     let mut blob = Vec::new();
     index.write_to(&mut blob).expect("serialize MPHF");
-    let client_index = KeywordIndex::read_from(&mut blob.as_slice()).expect("deserialize MPHF");
+    let client_index =
+        KeywordIndex::<20>::read_from(&mut blob.as_slice()).expect("deserialize MPHF");
     println!(
         "MPHF parameters              : {} B ({:.3} bits/key)",
         blob.len(),
         blob.len() as f64 * 8.0 / NUM_ADDRESSES as f64
     );
 
-    // ---- SERVER: populate the database. Record `r = MPHF(address)` occupies
-    // the same-column slot pair: the address itself, then its little-endian
-    // u256 balance one payload row below (`+ cols`). The vector spans whole
-    // bands so the trailing partially-used band is still addressable.
+    // ---- SERVER: populate the database. The MPHF is minimal, so its indices
+    // are exactly [0, 16 M) and each index is the record's payload index —
+    // no placement math, `DB[index(key)] = record`.
     let t = Instant::now();
-    let bands_used = NUM_ADDRESSES.div_ceil(cols * records_per_column);
-    let mut payloads = vec![[0u8; 32]; bands_used * payloads_per_column * cols];
+    let mut payloads = vec![[0u8; 64]; NUM_ADDRESSES];
     for key in &keys {
-        let base = record_base(index.index(key), cols, payloads_per_column);
-        payloads[base] = address_slot(key);
-        payloads[base + cols] = balance_of(key);
+        payloads[index.index(key)] = record_of(key);
     }
     server.update_shard(0, &payloads);
     drop(payloads);
@@ -227,9 +208,9 @@ where
 
     // ---- CLIENT: `batch` lookups, spread across the key set so they land in
     // different panels. Each address resolves locally through the MPHF to its
-    // record's column and costs exactly one query.
+    // record index and costs exactly one query.
     let stride = (NUM_ADDRESSES / batch).max(1);
-    let targets: Vec<EthAddress> = (0..batch)
+    let targets: Vec<Address> = (0..batch)
         .map(|k| keys[(QUERIED_ADDRESS + k * stride) % NUM_ADDRESSES])
         .collect();
 
@@ -237,14 +218,16 @@ where
     let mut queries = Vec::with_capacity(batch);
     let mut states = Vec::with_capacity(batch);
     for target in &targets {
-        let base = record_base(client_index.index(target), cols, payloads_per_column);
-        let (q, st) = client.query(base);
+        let (q, st) = client.query(client_index.index(target));
         queries.push(q);
         states.push(st);
     }
     println!("QUERY build ({batch})              : {:?}", t.elapsed());
     println!("queried address              : 0x{}", hex(&targets[0]));
-    println!("MPHF record index            : {}", client_index.index(&targets[0]));
+    println!(
+        "MPHF record index            : {}",
+        client_index.index(&targets[0])
+    );
 
     // ---- SERVER: answer the whole batch at once. ----
     let started = Instant::now();
@@ -267,81 +250,70 @@ where
     // query and one response per lookup. ----
     let module = server.params().module();
     let mut qbuf = Vec::new();
-    queries[0].write_to(module, &mut qbuf).expect("serialize query");
+    queries[0]
+        .write_to(module, &mut qbuf)
+        .expect("serialize query");
     let mut rbuf = Vec::new();
-    responses[0].write_to(module, &mut rbuf).expect("serialize response");
+    responses[0]
+        .write_to(module, &mut rbuf)
+        .expect("serialize response");
     println!("QUERY size                   : {} B", qbuf.len());
     println!("RESPONSE size                : {} B", rbuf.len());
 
-    // ---- CLIENT: decrypt each response once and slice both record halves out
-    // of the recovered column digits. The address half must equal the queried
-    // address exactly — that is the in-set check — and the balance half must
-    // match ground truth.
+    // ---- CLIENT: decode each response into its 64 B record. The address half
+    // must equal the queried address exactly — that is the in-set check — and
+    // the balance half must match ground truth.
     let mut ok = 0;
     for (target, (response, state)) in targets.iter().zip(responses.iter().zip(&states)) {
-        let [address, balance] = decode_record::<P>(&mut client, response, state);
-        if address == address_slot(target) && balance == balance_of(target) {
+        let record = client.decode(response, state);
+        if record == record_of(target) {
             ok += 1;
         }
     }
-    let first = balance_of(&targets[0]);
-    println!("balance                      : {} (LE storage, verified)", u256_hex(&first));
+    let first = record_of(&targets[0]);
+    println!(
+        "balance                      : {} (LE storage, verified)",
+        u256_hex(first[32..].try_into().unwrap())
+    );
 
     // ---- CLIENT: an address the MPHF never saw. It still resolves to a valid
-    // record and the PIR round trip proceeds identically — but the retrieved
-    // address slot belongs to some other account, so the mismatch exposes it
-    // and the lookup reports "not in set" instead of a stranger's balance.
+    // record index and the PIR round trip proceeds identically — but the
+    // retrieved record's address bytes belong to some other account, so the
+    // mismatch exposes it and the lookup reports "not in set" instead of a
+    // stranger's balance.
     let stranger = address_at((NUM_ADDRESSES + 42) as u64);
-    let base = record_base(client_index.index(&stranger), cols, payloads_per_column);
-    let (q, st) = client.query(base);
+    let (q, st) = client.query(client_index.index(&stranger));
     let response = server.respond(&q);
-    let [address, _balance] = decode_record::<P>(&mut client, &response, &st);
-    assert_ne!(address, address_slot(&stranger), "out-of-set address must not verify");
-    println!("out-of-set address 0x{}..    : rejected (address slot mismatch)", hex(&stranger[..4]));
+    let record = client.decode(&response, &st);
+    assert_ne!(record[..20], stranger, "out-of-set address must not verify");
+    println!(
+        "out-of-set address 0x{}..    : rejected (address mismatch)",
+        hex(&stranger[..4])
+    );
 
     if let Some(peak) = peak_rss_bytes() {
-        println!("PEAK MEMORY (VmHWM)          : {:.3} GiB", peak as f64 / (1u64 << 30) as f64);
+        println!(
+            "PEAK MEMORY (VmHWM)          : {:.3} GiB",
+            peak as f64 / (1u64 << 30) as f64
+        );
     }
     println!("RESULT                       : {ok}/{batch} lookups OK");
     assert_eq!(ok, batch, "lookup verification mismatch");
 }
 
-/// Decrypts one response and extracts the record's two 32-byte halves from the
-/// recovered column digits: the query's own slot at the state's row offset,
-/// then the slot one payload row below it (`+ P::EXPONENT` digits).
-fn decode_record<P>(
-    client: &mut Client<BE, P>,
-    response: &poulpy_pir::client::Response<BE>,
-    state: &poulpy_pir::client::QueryState<BE>,
-) -> [[u8; 32]; SLOTS_PER_RECORD]
-where
-    P: Payload<[u8; 32]>,
-{
-    let digits = client.decrypt_digits(response, state);
-    let base = state.address().row_offset;
-    let mut out = [[0u8; 32]; SLOTS_PER_RECORD];
-    for (k, half) in out.iter_mut().enumerate() {
-        let start = base + k * P::EXPONENT;
-        let slice: Vec<i16> = digits[start..start + P::EXPONENT]
-            .iter()
-            .map(|&v| v as i16)
-            .collect();
-        P::decode(half, &slice);
-    }
-    out
-}
-
-/// The address's 32-byte payload slot: the 20 address bytes, zero-padded.
-fn address_slot(key: &EthAddress) -> [u8; 32] {
-    let mut slot = [0u8; 32];
-    slot[..20].copy_from_slice(key);
-    slot
+/// The 64-byte record of an address: the address zero-padded to 32 bytes,
+/// followed by its little-endian `u256` token balance.
+fn record_of(key: &Address) -> [u8; 64] {
+    let mut record = [0u8; 64];
+    record[..20].copy_from_slice(key);
+    record[32..].copy_from_slice(&balance_of(key));
+    record
 }
 
 /// The `i`-th deterministic pseudo-random address (splitmix64 chain, as in the
 /// keyword module's tests). The first 8 bytes are injective in `i`, so the
 /// generated set is duplicate-free by construction.
-fn address_at(i: u64) -> EthAddress {
+fn address_at(i: u64) -> Address {
     let mut key = [0u8; 20];
     let mut z = i.wrapping_add(0x9e3779b97f4a7c15);
     for chunk in key.chunks_mut(8) {
@@ -353,7 +325,7 @@ fn address_at(i: u64) -> EthAddress {
 }
 
 /// The first `count` addresses of [`address_at`], generated in parallel.
-fn addresses(count: usize) -> Vec<EthAddress> {
+fn addresses(count: usize) -> Vec<Address> {
     let mut keys = vec![[0u8; 20]; count];
     let workers = std::thread::available_parallelism().map_or(1, |x| x.get());
     let chunk = count.div_ceil(workers).max(1);
@@ -373,7 +345,7 @@ fn addresses(count: usize) -> Vec<EthAddress> {
 /// The token balance of an address: a deterministic pseudo-random full `u256`,
 /// **little-endian** (byte 0 is least significant), derived from the address
 /// itself so ground truth is recomputable at verification time.
-fn balance_of(key: &EthAddress) -> [u8; 32] {
+fn balance_of(key: &Address) -> [u8; 32] {
     let mut z = u64::from_le_bytes(key[..8].try_into().unwrap());
     let mut value = [0u8; 32];
     for word in 0..4 {

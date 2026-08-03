@@ -21,7 +21,9 @@ use crate::{
     server::{
         Gemm, OnlineTimings, Server, ServerCollapse, ServerPrecomputation,
         api::RecursionServerModule,
-        common::{PreparedF64, body_product_acc_parallel, copy_vec_znx_rows, encode_torus_body_f64},
+        common::{
+            PreparedF64, body_product_acc_parallel, copy_vec_znx_rows, encode_torus_body_f64,
+        },
     },
 };
 
@@ -30,7 +32,7 @@ use super::{
 };
 
 #[allow(private_bounds)]
-impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Server<BE, P>
+impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload> Server<BE, P>
 where
     BE: poulpy_cpu_ref::reference::fft64::reim::ReimArith,
     Module<BE>: RecursionServerModule<BE>,
@@ -124,8 +126,9 @@ where
             }
 
             let mut resp_slots: Vec<Option<Response<BE>>> = (0..nq).map(|_| None).collect();
-            let mut worker_timings: Vec<OnlineTimings> =
-                (0..parallel_queries).map(|_| OnlineTimings::default()).collect();
+            let mut worker_timings: Vec<OnlineTimings> = (0..parallel_queries)
+                .map(|_| OnlineTimings::default())
+                .collect();
             {
                 let this = &*self;
                 let mut bodies_iter = all_bodies.into_iter();
@@ -356,8 +359,14 @@ where
 
         // resp2: the digit DB is query-dependent (mask precompute runs online).
         let q1_masks = &state.q1_masks;
-        let (resp2_prepared, resp2_precomputes) =
-            self.precompute_pack_mask_online(&body_data, q1_masks, gamma2, &key2, max_threads, timings);
+        let (resp2_prepared, resp2_precomputes) = self.precompute_pack_mask_online(
+            &body_data,
+            q1_masks,
+            gamma2,
+            &key2,
+            max_threads,
+            timings,
+        );
         let (resp2, resp2_body, resp2_pack) = pack_bodies_pooled(
             module,
             &state.src_infos,

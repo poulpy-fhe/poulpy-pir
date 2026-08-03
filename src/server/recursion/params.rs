@@ -10,22 +10,18 @@ use poulpy_hal::layouts::Backend;
 use crate::{config::Collapse, parameters::Parameters, payload::Payload};
 
 /// Modulus-switch precision after packing (`qtilde = 2^qtilde_bits`).
-pub(crate) fn qtilde_bits<BE: Backend, P: Payload<[u8; 32]>>(
-    params: &Parameters<BE, [u8; 32], P>,
-) -> usize {
+pub(crate) fn qtilde_bits<BE: Backend, P: Payload>(params: &Parameters<BE, P>) -> usize {
     2 * params.matmul_base2k()
 }
 
 /// Base2k=16 decomposition digits for one packed RLWE.
-pub(crate) fn tau<BE: Backend, P: Payload<[u8; 32]>>(
-    params: &Parameters<BE, [u8; 32], P>,
-) -> usize {
+pub(crate) fn tau<BE: Backend, P: Payload>(params: &Parameters<BE, P>) -> usize {
     crate::packing::recursion::decompose_digits(qtilde_bits(params))
 }
 
 /// The source ciphertext layout (the query / `resp0` regime).
-pub(crate) fn src_infos_for<BE: Backend, P: Payload<[u8; 32]>>(
-    params: &Parameters<BE, [u8; 32], P>,
+pub(crate) fn src_infos_for<BE: Backend, P: Payload>(
+    params: &Parameters<BE, P>,
 ) -> EncryptionLayout<GLWELayout> {
     EncryptionLayout::new_from_default_sigma(GLWELayout {
         n: Degree(params.n() as u32),
@@ -37,8 +33,8 @@ pub(crate) fn src_infos_for<BE: Backend, P: Payload<[u8; 32]>>(
 }
 
 /// Parameter validity shared by InsPIRe² client and server construction.
-pub(crate) fn assert_params_valid<BE: Backend, P: Payload<[u8; 32]>>(
-    params: &Parameters<BE, [u8; 32], P>,
+pub(crate) fn assert_params_valid<BE: Backend, P: Payload>(
+    params: &Parameters<BE, P>,
     t: usize,
     cols: usize,
 ) {

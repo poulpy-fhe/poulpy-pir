@@ -38,7 +38,7 @@ use crate::{
     payload::Payload,
 };
 
-mod api;
+pub(crate) mod api;
 mod common;
 mod default;
 mod delegates;
@@ -278,7 +278,7 @@ pub enum Query<BE: Backend> {
     Recursion(RecursionQuery<BE>),
 }
 
-pub(crate) enum ServerCollapse<BE: Backend, P: Payload<[u8; 32]>> {
+pub(crate) enum ServerCollapse<BE: Backend, P: Payload> {
     Interpolation(InterpolationState<BE, P>),
     Recursion(RecursionState<BE>),
 }
@@ -293,8 +293,8 @@ pub enum ServerPrecomputation<BE: Backend> {
 /// [`Server::new`]. Common state is stored directly on the server; only
 /// collapse-specific strategy/key/precomputation state is held behind field
 /// enums.
-pub struct Server<BE: Backend, P: Payload<[u8; 32]>> {
-    params: Parameters<BE, [u8; 32], P>,
+pub struct Server<BE: Backend, P: Payload> {
+    params: Parameters<BE, P>,
     layout: DatabaseLayout<P>,
     server_seed: ServerSeed,
     database: Database<BE, P>,
@@ -319,10 +319,10 @@ pub struct Server<BE: Backend, P: Payload<[u8; 32]>> {
     pack_scratch_bytes: std::sync::OnceLock<usize>,
 }
 
-impl<BE: Backend, P: Payload<[u8; 32]>> Server<BE, P> {
+impl<BE: Backend, P: Payload> Server<BE, P> {
     /// The shared cryptosystem parameters (used, e.g., to size a received
     /// [`Query`] in [`Query::read_from`]).
-    pub fn params(&self) -> &Parameters<BE, [u8; 32], P> {
+    pub fn params(&self) -> &Parameters<BE, P> {
         &self.params
     }
 
@@ -343,7 +343,7 @@ impl<BE: Backend, P: Payload<[u8; 32]>> Server<BE, P> {
 }
 
 #[allow(private_bounds)]
-impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Server<BE, P>
+impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload> Server<BE, P>
 where
     BE: poulpy_cpu_ref::reference::fft64::reim::ReimArith,
     Module<BE>: InterpolationServerModule<BE> + RecursionServerModule<BE>,
@@ -359,13 +359,13 @@ where
     /// Build the PIR server from a config and database layout. Parameters are
     /// instantiated internally and the construction is selected by
     /// [`Parameters::collapse`].
-    pub fn new(config: Config<[u8; 32], P>, layout: DatabaseLayout<P>) -> Self {
+    pub fn new(config: Config<P>, layout: DatabaseLayout<P>) -> Self {
         Self::from_params(config.new::<BE>(), layout)
     }
 
     /// Compatibility/internal constructor for call sites that already own
     /// instantiated parameters.
-    pub fn from_params(params: Parameters<BE, [u8; 32], P>, layout: DatabaseLayout<P>) -> Self {
+    pub fn from_params(params: Parameters<BE, P>, layout: DatabaseLayout<P>) -> Self {
         crate::parallel::tune_allocator();
         match params.collapse() {
             Collapse::Interpolation => Self::new_interpolation(params, layout),
@@ -374,12 +374,12 @@ where
     }
 
     /// Compatibility helper for interpolation (InsPIRe).
-    pub fn interpolation(config: Config<[u8; 32], P>, layout: DatabaseLayout<P>) -> Self {
+    pub fn interpolation(config: Config<P>, layout: DatabaseLayout<P>) -> Self {
         Self::new(config, layout)
     }
 
     /// Compatibility helper for InsPIRe².
-    pub fn recursion(config: Config<[u8; 32], P>, layout: DatabaseLayout<P>) -> Self {
+    pub fn recursion(config: Config<P>, layout: DatabaseLayout<P>) -> Self {
         Self::new(config, layout)
     }
 
@@ -428,12 +428,12 @@ where
 
     /// Bulk-write payloads from index `start` using the database's preprocessing
     /// layout (`n` for interpolation, `gamma0` for InsPIRe²).
-    pub fn update_shard(&mut self, start: usize, values: &[[u8; 32]]) {
+    pub fn update_shard(&mut self, start: usize, values: &[P::Block]) {
         self.database.encode_shard(start, values);
     }
 
     /// Ground-truth payload at index `i` from the server's own plaintext DB.
-    pub fn get(&self, i: usize) -> [u8; 32] {
+    pub fn get(&self, i: usize) -> P::Block {
         self.database.payload(i)
     }
 

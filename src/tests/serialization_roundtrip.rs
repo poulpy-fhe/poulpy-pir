@@ -9,7 +9,10 @@ use poulpy_cpu_avx::FFT64Avx;
 
 use crate::{
     client::Client,
-    config::{Collapse, Config, DEFAULT_BASE2K, DEFAULT_K, DEFAULT_N, DefaultPirParameters32B, DefaultScheme},
+    config::{
+        Collapse, Config, DEFAULT_BASE2K, DEFAULT_K, DEFAULT_N, DefaultPirParameters32B,
+        DefaultScheme,
+    },
     database::DatabaseLayout,
     payload::{Payload, U256P65535, U256P65536},
     serialization::{query_component_sizes, response_component_sizes},
@@ -25,9 +28,9 @@ fn fmt_kib(bytes: usize) -> String {
 /// Builds a real query+response at `config`/`layout` for `item`, then prints the
 /// serialized wire sizes (totals + per-component breakdown). Reports actual
 /// transmitted bytes after base2k=63 repacking + seed compression.
-fn report_sizes<P: Payload<[u8; 32]>>(
+fn report_sizes<P: Payload<Block = [u8; 32]>>(
     label: &str,
-    config: Config<[u8; 32], P>,
+    config: Config<P>,
     layout: DatabaseLayout<P>,
     item: usize,
 ) {
@@ -180,9 +183,9 @@ fn measure_serialized_sizes() {
 
 /// Serializes `query`, deserializes it against `params`, and asserts the byte
 /// stream round-trips (re-serializing the decoded value yields identical bytes).
-fn roundtrip_query<P: crate::payload::Payload<[u8; 32]>>(
+fn roundtrip_query<P: crate::payload::Payload>(
     query: &Query<BE>,
-    params: &crate::parameters::Parameters<BE, [u8; 32], P>,
+    params: &crate::parameters::Parameters<BE, P>,
     label: &str,
 ) -> Query<BE> {
     let module = params.module();
@@ -198,9 +201,9 @@ fn roundtrip_query<P: crate::payload::Payload<[u8; 32]>>(
     decoded
 }
 
-fn roundtrip_response<P: crate::payload::Payload<[u8; 32]>>(
+fn roundtrip_response<P: crate::payload::Payload>(
     response: &crate::client::Response<BE>,
-    params: &crate::parameters::Parameters<BE, [u8; 32], P>,
+    params: &crate::parameters::Parameters<BE, P>,
     label: &str,
 ) -> crate::client::Response<BE> {
     let module = params.module();
@@ -219,9 +222,9 @@ fn roundtrip_response<P: crate::payload::Payload<[u8; 32]>>(
     decoded
 }
 
-fn assert_query_size_matches_wire<P: crate::payload::Payload<[u8; 32]>>(
+fn assert_query_size_matches_wire<P: crate::payload::Payload>(
     query: &Query<BE>,
-    params: &crate::parameters::Parameters<BE, [u8; 32], P>,
+    params: &crate::parameters::Parameters<BE, P>,
     layout: DatabaseLayout<P>,
 ) {
     let module = params.module();
@@ -248,9 +251,9 @@ fn assert_query_size_matches_wire<P: crate::payload::Payload<[u8; 32]>>(
     }
 }
 
-fn assert_response_size_matches_wire<P: crate::payload::Payload<[u8; 32]>>(
+fn assert_response_size_matches_wire<P: crate::payload::Payload>(
     response: &crate::client::Response<BE>,
-    params: &crate::parameters::Parameters<BE, [u8; 32], P>,
+    params: &crate::parameters::Parameters<BE, P>,
     layout: DatabaseLayout<P>,
 ) {
     let module = params.module();
@@ -275,7 +278,7 @@ fn assert_response_size_matches_wire<P: crate::payload::Payload<[u8; 32]>>(
 
 #[test]
 fn size_helpers_match_wire_interpolation() {
-    let config = Config::<[u8; 32], U256P65535> {
+    let config = Config::<U256P65535> {
         n: 64,
         base2k: DEFAULT_BASE2K,
         k: DEFAULT_K,
@@ -302,7 +305,7 @@ fn size_helpers_match_wire_interpolation() {
 /// Interpolation collapse, full `n = 2048` FHE: run with `--release`.
 #[test]
 fn serialization_roundtrip_interpolation() {
-    let config = Config::<[u8; 32], U256P65535> {
+    let config = Config::<U256P65535> {
         n: DEFAULT_N,
         base2k: DEFAULT_BASE2K,
         k: DEFAULT_K,
@@ -346,7 +349,7 @@ fn serialization_roundtrip_interpolation() {
 /// Recursion (InsPIRe²) collapse on a tiny `n = 64` instance (fast in debug).
 #[test]
 fn serialization_roundtrip_recursion() {
-    let config = Config::<[u8; 32], U256P65536> {
+    let config = Config::<U256P65536> {
         n: 64,
         base2k: DEFAULT_BASE2K,
         k: DEFAULT_K,

@@ -46,6 +46,16 @@ resolves each preset to a parameter bundle containing the DB size, matching
 
 The reconstructed database splits from the paper's Table 2 are tabulated in [`table2_db_parameters.md`](table2_db_parameters.md); [`RECURSION_RAM_MODEL.md`](RECURSION_RAM_MODEL.md) gives memory-scaling estimates for InsPIRe² up to a 32 GiB database.
 
+## Application layers
+
+- Index PIR: use `Client` and `Server` directly when the caller already knows
+  the payload index.
+- Keyword PIR: use `keyword::KeywordIndex` / `KeywordDirectory` to map fixed
+  byte keys to payload indices, with a client-side in-record membership check.
+- ETH token-balance PIR: use the adjacent `../eth-pir` repository for the fixed
+  1 GiB, 64-byte-record demo service with live updates, keyword delta sync,
+  flush, rebuild, and resync.
+
 ## Running the example
 
 The driver [`examples/pir.rs`](examples/pir.rs) runs a full round trip — setup, database fill, offline preprocessing, query, answer, and decrypt — checks the recovered payload against ground truth, and prints a phase-by-phase timing and noise breakdown.

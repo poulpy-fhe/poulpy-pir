@@ -108,7 +108,7 @@ pub(crate) struct RecursionState<BE: Backend> {
     pub(crate) q1_masks: Vec<QueryMask>,
 }
 
-impl<BE: Backend, P: Payload<[u8; 32]>> Server<BE, P> {
+impl<BE: Backend, P: Payload> Server<BE, P> {
     fn recursion_state(&self) -> &RecursionState<BE> {
         let ServerCollapse::Recursion(state) = &self.collapse else {
             panic!("InsPIRe² state requested for non-InsPIRe² server");

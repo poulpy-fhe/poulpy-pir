@@ -104,9 +104,9 @@ fn format_bytes(bytes: f64) -> String {
     format!("{value:.3} {}", UNITS[unit])
 }
 
-fn run<P>(config: Config<[u8; 32], P>, layout: DatabaseLayout<P>, item_index: usize, batch: usize)
+fn run<P>(config: Config<P>, layout: DatabaseLayout<P>, item_index: usize, batch: usize)
 where
-    P: Payload<[u8; 32]>,
+    P: Payload<Block = [u8; 32]>,
 {
     let n = config.n();
     let column_height = config.column_height();
@@ -223,7 +223,10 @@ where
         println!("  {:<30}: {:?}", name, *sum / reps);
     }
     if batch > 1 {
-        println!("  per query (wall-clock)     : {:?}", avg_wall / batch as u32);
+        println!(
+            "  per query (wall-clock)     : {:?}",
+            avg_wall / batch as u32
+        );
         println!(
             "  throughput                 : {:.1} queries/s",
             batch as f64 / avg_wall.as_secs_f64()
@@ -269,7 +272,10 @@ where
 
     println!("RESULT                       : {ok}/{batch} decoded OK");
     if let Some(peak) = peak_rss_bytes() {
-        println!("PEAK MEMORY (VmHWM)          : {}", format_bytes(peak as f64));
+        println!(
+            "PEAK MEMORY (VmHWM)          : {}",
+            format_bytes(peak as f64)
+        );
     }
     assert_eq!(ok, batch, "{collapse:?} decode mismatch");
 }
@@ -305,12 +311,12 @@ fn fill_payloads(out: &mut [[u8; 32]], first_index: usize) {
 }
 
 fn print_layout_summary<P>(
-    config: Config<[u8; 32], P>,
+    config: Config<P>,
     layout: DatabaseLayout<P>,
     item_index: usize,
     address: poulpy_pir::database::Address,
 ) where
-    P: Payload<[u8; 32]>,
+    P: Payload<Block = [u8; 32]>,
 {
     let n = config.n();
     let column_height = config.column_height();

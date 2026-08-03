@@ -52,8 +52,8 @@ fn load_matrix_transposed(working: &mut VecZnx<Vec<u8>>, src: &CoeffMatrix, n: u
             let c1 = (c0 + INTERP_TILE).min(n);
             for r in r0..r1 {
                 let src_row = src.row(r);
-                for c in c0..c1 {
-                    working.at_mut(c, 0)[r] = src_row[c] as i64;
+                for (c, &value) in src_row.iter().enumerate().take(c1).skip(c0) {
+                    working.at_mut(c, 0)[r] = value as i64;
                 }
             }
             c0 = c1;
@@ -79,8 +79,8 @@ fn store_matrix_transposed(
             let c1 = (c0 + INTERP_TILE).min(n);
             for r in r0..r1 {
                 let d = dst.row_mut(r);
-                for c in c0..c1 {
-                    d[c] = encoder.mul(working.at(c, 0)[r], inv_t) as i16;
+                for (c, dst) in d.iter_mut().enumerate().take(c1).skip(c0) {
+                    *dst = encoder.mul(working.at(c, 0)[r], inv_t) as i16;
                 }
             }
             c0 = c1;
@@ -141,7 +141,7 @@ impl<BE: Backend> InterpolationResponse<BE> {
 
 /// A database interpolated **in place**: panels `0..nb_matrices` live in `db`'s
 /// own matrices (overwritten), the `interpolation_t − nb_matrices` tail panels
-/// in [`tail`](Self::tail). [`panel`](Self::panel) presents all `interpolation_t`
+/// in the internal tail. [`panel`](Self::panel) presents all `interpolation_t`
 /// panels uniformly as `k_blocks` sub-matrices each.
 pub struct Interpolated<'a> {
     db_matrices: &'a [CoeffMatrix],
@@ -177,9 +177,9 @@ pub struct Interpolation {
 impl Interpolation {
     /// Build from a [`DatabaseLayout`] and the cryptosystem [`Parameters`] (only
     /// the GGSW layout is taken).
-    pub fn new<BE: Backend, P: Payload<[u8; 32]>>(
+    pub fn new<BE: Backend, P: Payload>(
         layout: &DatabaseLayout<P>,
-        params: &Parameters<BE, [u8; 32], P>,
+        params: &Parameters<BE, P>,
     ) -> Self {
         let n = params.n();
         Self {
@@ -201,7 +201,7 @@ impl Interpolation {
     /// coefficient position — no transpose, because the stored orientation is
     /// already the matmul `U` orientation. Panels `0..nb_matrices` overwrite the
     /// database's matrices; the tail panels are returned in [`Interpolated`].
-    pub fn prepare<'a, BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>>(
+    pub fn prepare<'a, BE: Backend<OwnedBuf = Vec<u8>>, P: Payload>(
         &self,
         module: &Module<BE>,
         db: &'a mut Database<BE, P>,
@@ -272,7 +272,7 @@ impl Interpolation {
     /// `matrix` database (`interpolation_t × block_cols`), leaving `plain`
     /// untouched (so a server can re-run it after a payload `update`). `matrix`
     /// must already be sized to `interpolation_t` block-rows.
-    pub fn interpolate_into<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>>(
+    pub fn interpolate_into<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload>(
         &self,
         module: &Module<BE>,
         plain: &Database<BE, P>,

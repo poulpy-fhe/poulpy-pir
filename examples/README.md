@@ -1,3 +1,8 @@
+# Examples
+
+The live-update ETH token-balance demo has moved to the adjacent
+`../eth-pir` repository.
+
 # `key_word_pir` example
 
 Keyword PIR round trip: 16 M ETH addresses, each with a 64-byte record — the
@@ -6,13 +11,13 @@ full address (zero-padded to 32 B) plus its full 256-bit token balance
 backend is `FFT64Avx` (AVX2/FMA) by default; add `--features avx512-fhe`
 (with `RUSTFLAGS="-C target-feature=+avx512f"`) to run it on `FFT64Avx512`.
 
-The server builds a minimal perfect hash function (MPHF) over the address set
-and stores record `r = MPHF(address)` as a *same-column* pair of payload
-slots (payload indices are column-minor, so the pair is `i` and `i + cols`).
-A query encrypts only the column selector and its response carries the whole
-`γ0`-column (64 B at `γ0 = 32`), so one query retrieves both halves; the
-client — holding only the ~4 MiB MPHF parameters — resolves the record number
-locally and slices the two halves out of one decrypted response. The address
+The server builds a minimal perfect hash function (MPHF, `poulpy_pir::keyword`
+— a pure `[u8; N] key ↔ index` layer) over the address set, and each record is
+**one** `U512P65536` payload (`Payload::Block = [u8; 64]`): address in bytes
+`0..32`, little-endian balance in bytes `32..64`. The MPHF is minimal, so its
+index is the payload index — `DB[MPHF(address)] = record`, no placement math —
+and `Client::decode` returns the whole 64 B block from one response. The
+client holds only the ~4 MiB MPHF parameters, never the key set. The address
 half is the in-set check: an out-of-set address lands on some other account's
 record, whose address cannot match, so the lookup is rejected instead of
 leaking a balance.
@@ -21,9 +26,11 @@ leaking a balance.
 cargo run --release --example key_word_pir [-- <preset> [batch]]
 ```
 
-- `<preset>` — any 1 GiB-or-larger `DefaultPirParameters32B` preset whose
-  column holds a whole 64 B record: `γ0 ≥ 32` for InsPIRe², any InsPIRe
-  preset (default `InsPIRe2-g32-1GiB-c32768`).
+- `<preset>` — an InsPIRe² `DefaultPirParameters32B` preset with `γ0 ≥ 32`
+  (default `InsPIRe2-g32-1GiB-c32768`); the preset supplies geometry and
+  collapse, the 64 B payload type is the example's. The byte capacity is
+  unchanged — the same coefficients grouped as half as many, twice-as-large
+  records.
 - `[batch]` — address lookups (one query each) answered together per online
   batch (default 1).
 - Thread counts: same `PIR_THREADS` / `PIR_SETUP_THREADS` /

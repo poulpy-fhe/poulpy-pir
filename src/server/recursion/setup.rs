@@ -40,7 +40,7 @@ use super::{
 };
 
 #[allow(private_bounds)]
-impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload<[u8; 32]>> Server<BE, P>
+impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload> Server<BE, P>
 where
     BE: poulpy_cpu_ref::reference::fft64::reim::ReimArith,
     Module<BE>: RecursionServerModule<BE>,
@@ -52,10 +52,7 @@ where
     for<'b> BE::BufMut<'b>: HostDataMut,
 {
     /// Build the shared server with InsPIRe²-specific state.
-    pub(crate) fn new_recursion(
-        params: Parameters<BE, [u8; 32], P>,
-        layout: DatabaseLayout<P>,
-    ) -> Self {
+    pub(crate) fn new_recursion(params: Parameters<BE, P>, layout: DatabaseLayout<P>) -> Self {
         let key_infos = params.key_layout();
         let Collapse::Recursion {
             gamma0,

@@ -36,8 +36,8 @@ where
 }
 
 /// Internal coarse mask-regime layout.
-pub(super) fn mask_regime_infos<BE: Backend, P: Payload<[u8; 32]>>(
-    params: &Parameters<BE, [u8; 32], P>,
+pub(super) fn mask_regime_infos<BE: Backend, P: Payload>(
+    params: &Parameters<BE, P>,
 ) -> LWEMatrixLayout {
     let n = params.n();
     LWEMatrixLayout {
@@ -287,11 +287,9 @@ enum MaskSplit {
 /// bit-exact status quo). Read once — the choice must not change mid-run.
 fn mask_split() -> MaskSplit {
     static SPLIT: std::sync::OnceLock<MaskSplit> = std::sync::OnceLock::new();
-    *SPLIT.get_or_init(|| {
-        match std::env::var("PIR_MASK_SPLIT").as_deref() {
-            Ok("blocks") => MaskSplit::Blocks,
-            _ => MaskSplit::Cols,
-        }
+    *SPLIT.get_or_init(|| match std::env::var("PIR_MASK_SPLIT").as_deref() {
+        Ok("blocks") => MaskSplit::Blocks,
+        _ => MaskSplit::Cols,
     })
 }
 
@@ -400,12 +398,7 @@ fn mask_product_acc(
                         }
                         u.widen_into(&mut wide);
                         gemm.gemm_f64_add(
-                            &mut local,
-                            &wide,
-                            &rhs_strip,
-                            rows_out,
-                            u.rows_in,
-                            width,
+                            &mut local, &wide, &rhs_strip, rows_out, u.rows_in, width,
                         );
                     }
                     (col_start, width, local)
@@ -705,7 +698,14 @@ pub(super) fn body_product_acc_parallel(
                         let u = &db_views[rg][bc];
                         let rin = u.rows_in;
                         let u_band = &u.values[r0 * rin..(r0 + rows_band) * rin];
-                        gemm.gemm_i16_f64_add(&mut *tile.2, u_band, &rhs_all[bc], rows_band, rin, q);
+                        gemm.gemm_i16_f64_add(
+                            &mut *tile.2,
+                            u_band,
+                            &rhs_all[bc],
+                            rows_band,
+                            rin,
+                            q,
+                        );
                     }
                 }
             });
