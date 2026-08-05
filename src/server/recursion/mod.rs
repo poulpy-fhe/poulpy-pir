@@ -17,7 +17,7 @@ mod packing;
 mod params;
 mod setup;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "avx2-fhe"))]
 mod tests;
 
 use poulpy_core::{

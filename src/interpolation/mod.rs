@@ -10,7 +10,7 @@ pub use strategy::{
     interpolation_root_exponent,
 };
 
-#[cfg(test)]
+#[cfg(all(test, feature = "avx2-fhe"))]
 mod tests;
 
 use poulpy_core::layouts::{GLWEInfos, GLWEToBackendRef};

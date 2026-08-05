@@ -2,6 +2,30 @@
 name = "poulpy-pir"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
+description = "Single-server, communication-efficient private information retrieval with server-side preprocessing."
+license = "Apache-2.0"
+repository = "https://github.com/poulpy-fhe/poulpy-pir"
+homepage = "https://github.com/poulpy-fhe/poulpy-pir"
+documentation = "https://docs.rs/poulpy-pir"
+readme = "README.md"
+keywords = ["pir", "fhe", "cryptography", "privacy"]
+categories = ["cryptography", "algorithms"]
+include = [
+    "Cargo.toml",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "README.md",
+    "RECURSION_RAM_MODEL.md",
+    "RELEASE.md",
+    "SECURITY.md",
+    "table2_db_parameters.md",
+    "build.rs",
+    "src/**",
+    "examples/**",
+    "benches/**",
+]
 
 [dependencies]
 getrandom = "0.4.3"
@@ -15,7 +39,7 @@ private-gemm-x86 = { version = "=0.1.20", default-features = false }
 poulpy-core = "0.7.0"
 poulpy-hal = "0.7.0"
 poulpy-cpu-ref = { version = "0.7.0", features = ["enable-core"] }
-poulpy-cpu-avx = { version = "0.7.0", features = ["enable-avx"] }
+poulpy-cpu-avx = { version = "0.7.0", features = ["enable-avx"], optional = true }
 # AVX-512 FHE backend (FFT64Avx512). Optional and never named in the library —
 # only the `pir` example (a run-site "binary") imports it, gated by the
 # `avx512-fhe` feature. `enable-avx512f` suffices (FFT64Avx512 needs only
@@ -24,6 +48,10 @@ poulpy-cpu-avx = { version = "0.7.0", features = ["enable-avx"] }
 poulpy-cpu-avx512 = { version = "0.7.0", features = ["enable-avx512f"], optional = true }
 
 [features]
+# Pulls in the optional AVX2/FMA FHE backend used by tests, benches, and the
+# default keyword example backend. Build on an AVX2/FMA host with:
+#   RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test --features avx2-fhe
+avx2-fhe = ["dep:poulpy-cpu-avx"]
 # Pulls in the optional AVX-512 FHE backend for the `pir` example.
 # Build/run on an AVX-512F host with:
 #   RUSTFLAGS="-C target-feature=+avx512f" cargo run --release --features avx512-fhe --example pir -- <preset>
@@ -59,8 +87,8 @@ path = "examples/pir.rs"
 required-features = ["avx512-fhe"]
 
 # Keyword PIR (lookup by ETH address through the MPHF in `src/keyword`).
-# Defaults to the always-available AVX2 backend (FFT64Avx); add
-# `--features avx512-fhe` to run it on FFT64Avx512.
+# Defaults to the scalar reference backend; add `--features avx2-fhe` with
+# AVX2/FMA RUSTFLAGS for FFT64Avx, or `--features avx512-fhe` for FFT64Avx512.
 [[example]]
 name = "key_word_pir"
 path = "examples/key_word_pir.rs"
@@ -69,11 +97,13 @@ path = "examples/key_word_pir.rs"
 name = "packing"
 path = "benches/packing/main.rs"
 harness = false
+required-features = ["avx2-fhe"]
 
 [[bench]]
 name = "poly_eval"
 path = "benches/poly_eval/main.rs"
 harness = false
+required-features = ["avx2-fhe"]
 
 [[bench]]
 name = "mask_product"

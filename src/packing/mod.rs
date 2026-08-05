@@ -21,5 +21,5 @@ pub use api::*;
 pub use packing_keys::*;
 pub use packing_precomputations::*;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "avx2-fhe"))]
 mod tests;

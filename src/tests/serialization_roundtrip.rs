@@ -186,19 +186,90 @@ fn measure_serialized_sizes() {
 fn roundtrip_query<P: crate::payload::Payload>(
     query: &Query<BE>,
     params: &crate::parameters::Parameters<BE, P>,
+    layout: DatabaseLayout<P>,
     label: &str,
 ) -> Query<BE> {
     let module = params.module();
     let mut bytes = Vec::new();
     query.write_to(module, &mut bytes).expect("query write_to");
     eprintln!("[{label}] query serialized: {} bytes", bytes.len());
-    let decoded = Query::read_from(&mut &bytes[..], params).expect("query read_from");
+    let decoded = Query::read_from(&mut &bytes[..], params, layout).expect("query read_from");
     let mut bytes2 = Vec::new();
     decoded
         .write_to(module, &mut bytes2)
         .expect("query re-write_to");
     assert_eq!(bytes, bytes2, "query serialization is not stable");
     decoded
+}
+
+#[test]
+fn query_read_rejects_interpolation_length_mismatch_before_allocation() {
+    let config = Config::<U256P65535> {
+        n: 64,
+        base2k: DEFAULT_BASE2K,
+        k: DEFAULT_K,
+        collapse: Collapse::Interpolation,
+        _phantom: PhantomData,
+    };
+    let layout = DatabaseLayout::<U256P65535>::new(64, 64);
+    let params = config.new::<BE>();
+    let mut bytes = Vec::new();
+    bytes.push(0); // TAG_INTERPOLATION
+    bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+
+    let Err(err) = Query::read_from(&mut &bytes[..], &params, layout) else {
+        panic!("malicious interpolation query length was accepted");
+    };
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn query_read_rejects_recursion_length_mismatch_before_allocation() {
+    let config = Config::<U256P65536> {
+        n: 64,
+        base2k: DEFAULT_BASE2K,
+        k: DEFAULT_K,
+        collapse: Collapse::Recursion {
+            gamma0: 32,
+            gamma1: 32,
+            gamma2: 16,
+        },
+        _phantom: PhantomData,
+    };
+    let layout = DatabaseLayout::<U256P65536>::new(64, 64);
+    let params = config.new::<BE>();
+    let mut bytes = Vec::new();
+    bytes.push(1); // TAG_RECURSION
+    bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+
+    let Err(err) = Query::read_from(&mut &bytes[..], &params, layout) else {
+        panic!("malicious recursion query length was accepted");
+    };
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn response_read_rejects_recursion_length_mismatch_before_allocation() {
+    let config = Config::<U256P65536> {
+        n: 64,
+        base2k: DEFAULT_BASE2K,
+        k: DEFAULT_K,
+        collapse: Collapse::Recursion {
+            gamma0: 32,
+            gamma1: 32,
+            gamma2: 16,
+        },
+        _phantom: PhantomData,
+    };
+    let params = config.new::<BE>();
+    let mut bytes = Vec::new();
+    bytes.push(1); // TAG_RECURSION
+    bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+
+    let Err(err) = crate::client::Response::read_from(&mut &bytes[..], &params) else {
+        panic!("malicious recursion response length was accepted");
+    };
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }
 
 fn roundtrip_response<P: crate::payload::Payload>(
@@ -336,7 +407,7 @@ fn serialization_roundtrip_interpolation() {
     assert_query_size_matches_wire(&query, client.params(), layout);
 
     // Query travels client → server over the wire.
-    let query = roundtrip_query(&query, server.params(), "interpolation");
+    let query = roundtrip_query(&query, server.params(), layout, "interpolation");
     let response = server.respond(&query);
     assert_response_size_matches_wire(&response, server.params(), layout);
     // Response travels server → client over the wire.
@@ -379,7 +450,7 @@ fn serialization_roundtrip_recursion() {
     let (query, state) = client.query(item);
     assert_query_size_matches_wire(&query, client.params(), layout);
 
-    let query = roundtrip_query(&query, server.params(), "recursion");
+    let query = roundtrip_query(&query, server.params(), layout, "recursion");
     let response = server.respond(&query);
     assert_response_size_matches_wire(&response, server.params(), layout);
     let response = roundtrip_response(&response, client.params(), "recursion");

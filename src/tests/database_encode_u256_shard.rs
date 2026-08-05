@@ -84,9 +84,9 @@ fn database_encode_shard_roundtrips_via_matrix_inspection() {
     }
 }
 
-/// Out-of-range writes must be caught by the capacity assert.
+/// Out-of-range writes must be caught by the compatibility panic wrapper.
 #[test]
-#[should_panic(expected = "shard writes past the configured capacity")]
+#[should_panic(expected = "past capacity")]
 fn database_encode_shard_rejects_overflow() {
     let n: usize = 32;
     let module = Module::<BE>::new(n as u64);

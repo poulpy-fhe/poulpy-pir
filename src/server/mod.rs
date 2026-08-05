@@ -34,6 +34,7 @@ use crate::{
     client::{Response, ServerSeed},
     config::{Collapse, Config},
     database::{Database, DatabaseLayout},
+    error::{PirError, Result},
     interpolation::InterpolationQuery,
     parameters::Parameters,
     payload::Payload,
@@ -414,7 +415,12 @@ where
     /// instantiated internally and the construction is selected by
     /// [`Parameters::collapse`].
     pub fn new(config: Config<P>, layout: DatabaseLayout<P>) -> Self {
-        Self::from_params(config.new::<BE>(), layout)
+        Self::try_new(config, layout).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible server constructor for production callers.
+    pub fn try_new(config: Config<P>, layout: DatabaseLayout<P>) -> Result<Self> {
+        Ok(Self::from_params(config.try_new::<BE>()?, layout))
     }
 
     /// Compatibility/internal constructor for call sites that already own
@@ -483,7 +489,13 @@ where
     /// Bulk-write payloads from index `start` using the database's preprocessing
     /// layout (`n` for interpolation, `gamma0` for InsPIRe²).
     pub fn update_shard(&mut self, start: usize, values: &[P::Block]) {
-        self.database.encode_shard(start, values);
+        self.try_update_shard(start, values)
+            .unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    /// Fallible payload shard update.
+    pub fn try_update_shard(&mut self, start: usize, values: &[P::Block]) -> Result<()> {
+        self.database.try_encode_shard(start, values)
     }
 
     /// Allocate an empty database matching this server's shape, for use as a
@@ -571,14 +583,30 @@ where
 
     /// ONLINE: answer a query, dispatching on its collapse variant.
     pub fn respond(&mut self, query: &Query<BE>) -> Response<BE> {
-        self.respond_timed(query).0
+        self.try_respond(query)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible ONLINE response builder.
+    pub fn try_respond(&mut self, query: &Query<BE>) -> Result<Response<BE>> {
+        Ok(self.try_respond_timed(query)?.0)
     }
 
     /// ONLINE: answer a query and return an ordered timing breakdown.
     pub fn respond_timed(&mut self, query: &Query<BE>) -> (Response<BE>, OnlineTimings) {
+        self.try_respond_timed(query)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible ONLINE response builder with timings.
+    pub fn try_respond_timed(
+        &mut self,
+        query: &Query<BE>,
+    ) -> Result<(Response<BE>, OnlineTimings)> {
+        self.ensure_query_matches(query)?;
         match query {
-            Query::Interpolation(q) => self.respond_interpolation(q),
-            Query::Recursion(q) => self.respond_recursion(q),
+            Query::Interpolation(q) => Ok(self.respond_interpolation(q)),
+            Query::Recursion(q) => Ok(self.respond_recursion(q)),
         }
     }
 
@@ -602,7 +630,13 @@ where
     /// All queries in the batch must use the same construction as the server;
     /// passing a query of the other variant panics.
     pub fn respond_batch(&mut self, queries: &[Query<BE>]) -> Vec<Response<BE>> {
-        self.respond_batch_timed(queries).0
+        self.try_respond_batch(queries)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible batched ONLINE response builder.
+    pub fn try_respond_batch(&mut self, queries: &[Query<BE>]) -> Result<Vec<Response<BE>>> {
+        Ok(self.try_respond_batch_timed(queries)?.0)
     }
 
     /// ONLINE (batched) with an aggregated per-phase timing breakdown summed over
@@ -614,8 +648,20 @@ where
         &mut self,
         queries: &[Query<BE>],
     ) -> (Vec<Response<BE>>, OnlineTimings) {
+        self.try_respond_batch_timed(queries)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible batched ONLINE response builder with timings.
+    pub fn try_respond_batch_timed(
+        &mut self,
+        queries: &[Query<BE>],
+    ) -> Result<(Vec<Response<BE>>, OnlineTimings)> {
         if queries.is_empty() {
-            return (Vec::new(), OnlineTimings::default());
+            return Ok((Vec::new(), OnlineTimings::default()));
+        }
+        for query in queries {
+            self.ensure_query_matches(query)?;
         }
         let all_interpolation = queries.iter().all(|q| matches!(q, Query::Interpolation(_)));
         if all_interpolation {
@@ -626,7 +672,7 @@ where
                     Query::Recursion(_) => unreachable!("checked all-interpolation above"),
                 })
                 .collect();
-            return self.respond_interpolation_batch(&interp);
+            return Ok(self.respond_interpolation_batch(&interp));
         }
         let all_recursion = queries.iter().all(|q| matches!(q, Query::Recursion(_)));
         if all_recursion {
@@ -637,18 +683,41 @@ where
                     Query::Interpolation(_) => unreachable!("checked all-recursion above"),
                 })
                 .collect();
-            return self.respond_recursion_batch(&rec);
+            return Ok(self.respond_recursion_batch(&rec));
         }
         // Mixed batch (both constructions): no batched fast path — answer one by one
         // and sum the per-query timings so the report still covers every step.
         let mut responses = Vec::with_capacity(queries.len());
         let mut timings = OnlineTimings::default();
         for q in queries {
-            let (resp, t) = self.respond_timed(q);
+            let (resp, t) = self.try_respond_timed(q)?;
             responses.push(resp);
             timings.accumulate(&t);
         }
-        (responses, timings)
+        Ok((responses, timings))
+    }
+
+    fn ensure_query_matches(&self, query: &Query<BE>) -> Result<()> {
+        let expected = collapse_name(self.params.collapse());
+        let actual = query_name(query);
+        if expected == actual {
+            return Ok(());
+        }
+        Err(PirError::WrongQueryVariant { expected, actual })
+    }
+}
+
+fn collapse_name(collapse: Collapse) -> &'static str {
+    match collapse {
+        Collapse::Interpolation => "Interpolation",
+        Collapse::Recursion { .. } => "Recursion",
+    }
+}
+
+fn query_name<BE: Backend>(query: &Query<BE>) -> &'static str {
+    match query {
+        Query::Interpolation(_) => "Interpolation",
+        Query::Recursion(_) => "Recursion",
     }
 }
 

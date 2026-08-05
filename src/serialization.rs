@@ -73,6 +73,7 @@ use poulpy_hal::{
 
 use crate::{
     client::{QueryCommon, RecursionResponse, Response},
+    database::DatabaseLayout,
     interpolation::{InterpolationKeys, InterpolationQuery, InterpolationResponse},
     packing::recursion::qtilde_glwe_layout,
     parameters::Parameters,
@@ -108,6 +109,19 @@ fn invalid_tag(kind: &str, tag: u8) -> std::io::Error {
     )
 }
 
+fn invalid_data(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message.into())
+}
+
+fn ensure_len(kind: &str, got: usize, expected: usize) -> Result<()> {
+    if got == expected {
+        return Ok(());
+    }
+    Err(invalid_data(format!(
+        "{kind} length mismatch: got {got}, expected {expected}"
+    )))
+}
+
 // --- little-endian scalar helpers (no extra dependency) ---------------------
 
 fn write_u8<W: Write>(writer: &mut W, v: u8) -> Result<()> {
@@ -135,7 +149,8 @@ fn write_len<W: Write>(writer: &mut W, len: usize) -> Result<()> {
 }
 
 fn read_len<R: Read>(reader: &mut R) -> Result<usize> {
-    Ok(read_u64(reader)? as usize)
+    usize::try_from(read_u64(reader)?)
+        .map_err(|_| invalid_data("wire length does not fit in usize"))
 }
 
 // --- base2k repacking helpers (non-gadget VecZnx-backed ciphertexts) --------
@@ -291,12 +306,13 @@ where
     GLWE<Vec<u8>>: GLWEToBackendRef<BE> + GLWEToBackendMut<BE>,
     for<'b> BE::BufMut<'b>: HostDataMut,
 {
+    let mut ggsw = ctx.module.ggsw_compressed_alloc_from_infos(infos);
     let seed_len = read_len(reader)?;
+    ensure_len("GGSW seed", seed_len, ggsw.seed().len())?;
     let mut seeds = vec![[0u8; 32]; seed_len];
     for s in &mut seeds {
         reader.read_exact(s)?;
     }
-    let mut ggsw = ctx.module.ggsw_compressed_alloc_from_infos(infos);
     *ggsw.seed_mut() = seeds;
 
     let dnum = ggsw.dnum().as_usize();
@@ -428,10 +444,14 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>> Query<BE> {
     }
 
     /// Deserialize a query written by [`Query::write_to`], sizing every buffer
-    /// from `params`.
+    /// from `params` and `layout`.
+    ///
+    /// Length prefixes are required to match the configured PIR shape exactly,
+    /// which keeps untrusted inputs from driving allocation before validation.
     pub fn read_from<R: Read, P: Payload>(
         reader: &mut R,
         params: &Parameters<BE, P>,
+        layout: DatabaseLayout<P>,
     ) -> Result<Self>
     where
         Module<BE>: ModuleN
@@ -454,10 +474,20 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>> Query<BE> {
         let tag = read_u8(reader)?;
         match tag {
             TAG_INTERPOLATION => {
+                if params.collapse() != crate::config::Collapse::Interpolation {
+                    return Err(invalid_data(
+                        "interpolation query received for non-interpolation parameters",
+                    ));
+                }
                 let glwe_query = params.glwe_query();
                 let key_layout = params.key_layout();
                 let ggsw_layout = params.ggsw_layout();
                 let n_blocks = read_len(reader)?;
+                ensure_len(
+                    "interpolation query block",
+                    n_blocks,
+                    layout.column_blocks(params.n()),
+                )?;
                 let mut blocks = Vec::with_capacity(n_blocks);
                 for _ in 0..n_blocks {
                     blocks.push(read_glwe_compressed(&mut ctx, reader, &glwe_query)?);
@@ -472,14 +502,25 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>> Query<BE> {
                 }))
             }
             TAG_RECURSION => {
+                let crate::config::Collapse::Recursion { gamma0, .. } = params.collapse() else {
+                    return Err(invalid_data(
+                        "recursion query received for non-recursion parameters",
+                    ));
+                };
                 let glwe_pack = params.glwe_pack();
                 let key_layout = params.key_layout();
                 let n0 = read_len(reader)?;
+                ensure_len("recursion src0", n0, layout.column_blocks(params.n()))?;
                 let mut src0 = Vec::with_capacity(n0);
                 for _ in 0..n0 {
                     src0.push(read_glwe_compressed(&mut ctx, reader, &glwe_pack)?);
                 }
                 let n1 = read_len(reader)?;
+                ensure_len(
+                    "recursion src1",
+                    n1,
+                    layout.grid_rows_for(gamma0).div_ceil(params.n()),
+                )?;
                 let mut src1 = Vec::with_capacity(n1);
                 for _ in 0..n1 {
                     src1.push(read_glwe_compressed(&mut ctx, reader, &glwe_pack)?);
@@ -564,6 +605,11 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>> Response<BE> {
         let tag = read_u8(reader)?;
         match tag {
             TAG_INTERPOLATION => {
+                if params.collapse() != crate::config::Collapse::Interpolation {
+                    return Err(invalid_data(
+                        "interpolation response received for non-interpolation parameters",
+                    ));
+                }
                 let glwe_pack = params.glwe_pack();
                 let selected = read_glwe(&mut ctx, reader, &glwe_pack)?;
                 Ok(Response::Interpolation(InterpolationResponse::new(
@@ -571,14 +617,27 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>> Response<BE> {
                 )))
             }
             TAG_RECURSION => {
+                let crate::config::Collapse::Recursion {
+                    gamma0,
+                    gamma1,
+                    gamma2,
+                } = params.collapse()
+                else {
+                    return Err(invalid_data(
+                        "recursion response received for non-recursion parameters",
+                    ));
+                };
                 let qtilde_infos =
                     qtilde_glwe_layout(Degree(params.n() as u32), qtilde_bits(params));
                 let n1 = read_len(reader)?;
+                let tau = qtilde_bits(params).div_ceil(params.matmul_base2k());
+                ensure_len("recursion resp1", n1, (params.n() * tau).div_ceil(gamma1))?;
                 let mut resp1 = Vec::with_capacity(n1);
                 for _ in 0..n1 {
                     resp1.push(read_glwe(&mut ctx, reader, &qtilde_infos)?);
                 }
                 let n2 = read_len(reader)?;
+                ensure_len("recursion resp2", n2, (gamma0 * tau).div_ceil(gamma2))?;
                 let mut resp2 = Vec::with_capacity(n2);
                 for _ in 0..n2 {
                     resp2.push(read_glwe(&mut ctx, reader, &qtilde_infos)?);
@@ -656,14 +715,15 @@ where
     A: GGLWEInfos,
 {
     let p = read_u64(reader)? as i64;
+    let mut key = ctx
+        .module
+        .glwe_automorphism_key_compressed_alloc_from_infos(key_infos);
     let seed_len = read_len(reader)?;
+    ensure_len("automorphism-key seed", seed_len, key.seed().len())?;
     let mut seeds = vec![[0u8; 32]; seed_len];
     for s in &mut seeds {
         reader.read_exact(s)?;
     }
-    let mut key = ctx
-        .module
-        .glwe_automorphism_key_compressed_alloc_from_infos(key_infos);
     key.set_p(p);
     *key.seed_mut() = seeds;
 
@@ -734,7 +794,7 @@ where
 
 /// Per-component serialized byte sizes of a [`Query`] (each part written to its
 /// own buffer), for reporting/regression of wire sizes.
-#[cfg(test)]
+#[cfg(all(test, feature = "avx2-fhe"))]
 #[allow(private_interfaces)]
 pub(crate) fn query_component_sizes<BE: Backend<OwnedBuf = Vec<u8>>>(
     query: &Query<BE>,
@@ -801,7 +861,7 @@ where
 }
 
 /// Per-component serialized byte sizes of a [`Response`].
-#[cfg(test)]
+#[cfg(all(test, feature = "avx2-fhe"))]
 pub(crate) fn response_component_sizes<BE: Backend<OwnedBuf = Vec<u8>>>(
     response: &Response<BE>,
     module: &Module<BE>,

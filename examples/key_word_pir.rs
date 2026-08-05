@@ -38,9 +38,10 @@
 //! `PIR_THREADS` (base), `PIR_SETUP_THREADS`, `PIR_OFFLINE_THREADS`,
 //! `PIR_ONLINE_THREADS` — see `examples/README.md`.
 //!
-//! The backend is `FFT64Avx` (AVX2/FMA) by default; build with
-//! `--features avx512-fhe` (and `RUSTFLAGS="-C target-feature=+avx512f"`) to
-//! run on `FFT64Avx512` instead.
+//! The portable default backend is `FFT64Ref`. Build with `--features avx2-fhe`
+//! and `RUSTFLAGS="-C target-feature=+avx2,+fma"` to run on `FFT64Avx`, or with
+//! `--features avx512-fhe` and `RUSTFLAGS="-C target-feature=+avx512f"` to run on
+//! `FFT64Avx512`.
 
 use std::time::Instant;
 
@@ -53,12 +54,14 @@ use poulpy_pir::{
     server::Server,
 };
 
-/// Backend used by this driver: `FFT64Avx512` when built with `avx512-fhe`,
-/// `FFT64Avx` otherwise.
+/// Backend used by this driver: AVX-512 when requested, AVX2 when requested,
+/// otherwise the scalar reference backend.
 #[cfg(feature = "avx512-fhe")]
 type BE = poulpy_cpu_avx512::FFT64Avx512;
-#[cfg(not(feature = "avx512-fhe"))]
+#[cfg(all(not(feature = "avx512-fhe"), feature = "avx2-fhe"))]
 type BE = poulpy_cpu_avx::FFT64Avx;
+#[cfg(all(not(feature = "avx512-fhe"), not(feature = "avx2-fhe")))]
+type BE = poulpy_cpu_ref::FFT64Ref;
 
 /// The payload codec: one 64-byte block = (32 B address, 32 B balance).
 type P = U512P65536;

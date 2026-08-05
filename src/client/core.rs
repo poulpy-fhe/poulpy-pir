@@ -19,6 +19,7 @@ use poulpy_hal::{
 use crate::{
     config::{Collapse, Config, DefaultPirParameters32B, DefaultScheme},
     database::{DatabaseLayout, PayloadAddress},
+    error::{PirError, Result},
     interpolation::{Interpolation, InterpolationKeys},
     packing::PackingKeysGenerate,
     packing::recursion::qtilde_glwe_layout,
@@ -97,13 +98,18 @@ where
     for<'b> BE::BufMut<'b>: HostDataMut,
 {
     pub fn new(config: Config<P>, layout: DatabaseLayout<P>) -> Self {
-        let params = config.new::<BE>();
+        Self::try_new(config, layout).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible constructor for production callers.
+    pub fn try_new(config: Config<P>, layout: DatabaseLayout<P>) -> Result<Self> {
+        let params = config.try_new::<BE>()?;
         let scratch = ScratchOwned::<BE>::alloc(client_scratch_bytes(&params));
-        Self {
+        Ok(Self {
             params,
             layout,
             scratch,
-        }
+        })
     }
 
     /// The shared parameters (handy for callers that build reduction units).
@@ -163,11 +169,17 @@ where
     /// Build a query for `payload_index`, dispatching internally on the selected
     /// collapse.
     pub fn query(&mut self, payload_index: usize) -> (Query<BE>, QueryState<BE>) {
+        self.try_query(payload_index)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible query builder that rejects out-of-range payload indices.
+    pub fn try_query(&mut self, payload_index: usize) -> Result<(Query<BE>, QueryState<BE>)> {
         let address = self
             .layout
-            .address_for(payload_index, self.params.column_height());
+            .try_address_for(payload_index, self.params.column_height())?;
         let server_seed = ServerSeed::default();
-        match self.params.collapse() {
+        let out = match self.params.collapse() {
             Collapse::Interpolation => {
                 let (common, mut ctx, sk) = self.begin_query(&address, &server_seed);
                 let interpolation = Interpolation::new(&self.layout, &self.params);
@@ -216,7 +228,8 @@ where
                 let query = Query::Recursion(RecursionQuery { src0, src1, keys });
                 (query, QueryState::new(Sk::new(material.sk_lwe), address))
             }
-        }
+        };
+        Ok(out)
     }
 
     /// Decrypts the server's [`Response`] with `sk`, dispatching on the collapse
@@ -225,6 +238,18 @@ where
     /// `out[row_offset .. row_offset + 16]`). For [`Response::Recursion`] it is the
     /// `γ0` `Z_p` record.
     pub fn decrypt(&mut self, response: &Response<BE>, sk: &Sk<BE>) -> Vec<i64> {
+        self.try_decrypt(response, sk)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible response decryptor that rejects collapse mismatches before the
+    /// lower-level arithmetic path can panic.
+    pub fn try_decrypt(&mut self, response: &Response<BE>, sk: &Sk<BE>) -> Result<Vec<i64>> {
+        self.ensure_response_matches(response)?;
+        Ok(self.decrypt_unchecked(response, sk))
+    }
+
+    fn decrypt_unchecked(&mut self, response: &Response<BE>, sk: &Sk<BE>) -> Vec<i64> {
         let params = &self.params;
         let module = params.module();
         let sk_pack_prep = self.prepare_pack_secret(sk);
@@ -270,7 +295,16 @@ where
     }
 
     pub fn decrypt_digits(&mut self, response: &Response<BE>, state: &QueryState<BE>) -> Vec<i64> {
-        self.decrypt(response, state.sk())
+        self.try_decrypt_digits(response, state)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_decrypt_digits(
+        &mut self,
+        response: &Response<BE>,
+        state: &QueryState<BE>,
+    ) -> Result<Vec<i64>> {
+        self.try_decrypt(response, state.sk())
     }
 
     /// Computes the final response noise against the full selected plaintext
@@ -361,18 +395,39 @@ where
     }
 
     pub fn decode(&mut self, response: &Response<BE>, state: &QueryState<BE>) -> P::Block {
-        let digits = self.decrypt_digits(response, state);
+        self.try_decode(response, state)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible payload decoder.
+    pub fn try_decode(
+        &mut self,
+        response: &Response<BE>,
+        state: &QueryState<BE>,
+    ) -> Result<P::Block> {
+        let digits = self.try_decrypt_digits(response, state)?;
         let start = state.address().row_offset;
         let end = start + P::EXPONENT;
-        assert!(
-            end <= digits.len(),
-            "response has {} digits but payload slice ends at {end}",
-            digits.len()
-        );
+        if end > digits.len() {
+            return Err(PirError::DigitRunOutOfBounds {
+                offset: start,
+                len: P::EXPONENT,
+                column_height: digits.len(),
+            });
+        }
         let payload_digits: Vec<i16> = digits[start..end].iter().map(|&v| v as i16).collect();
         let mut out = P::Block::zeroed();
         P::decode(&mut out, &payload_digits);
-        out
+        Ok(out)
+    }
+
+    fn ensure_response_matches(&self, response: &Response<BE>) -> Result<()> {
+        let expected = collapse_name(self.params.collapse());
+        let actual = response_name(response);
+        if expected == actual {
+            return Ok(());
+        }
+        Err(PirError::WrongResponseVariant { expected, actual })
     }
 
     fn prepare_pack_secret(&self, sk: &Sk<BE>) -> BackendGLWESecretPrepared<BE> {
@@ -514,6 +569,20 @@ where
                 &mut self.scratch.borrow(),
             ),
         }
+    }
+}
+
+fn collapse_name(collapse: Collapse) -> &'static str {
+    match collapse {
+        Collapse::Interpolation => "Interpolation",
+        Collapse::Recursion { .. } => "Recursion",
+    }
+}
+
+fn response_name<BE: Backend>(response: &Response<BE>) -> &'static str {
+    match response {
+        Response::Interpolation(_) => "Interpolation",
+        Response::Recursion(_) => "Recursion",
     }
 }
 

@@ -7,6 +7,7 @@ use poulpy_hal::{
 
 use crate::{
     database::DatabaseLayout,
+    error::{PirError, Result},
     parameters::Parameters,
     payload::{Payload, U256P65535, U256P65536},
 };
@@ -897,20 +898,31 @@ where
     where
         Module<BE>: ModuleNew<BE>,
     {
-        assert!(
-            P::EXPONENT <= self.column_height(),
-            "payload digits must fit within one scheme column"
-        );
-        if let Collapse::Recursion { gamma0, .. } = self.collapse {
-            assert!(
-                gamma0.is_multiple_of(P::EXPONENT),
-                "Recursion gamma0 must be a whole number of payloads"
-            );
+        self.try_new().unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible parameter instantiation for production callers.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn try_new<BE: Backend>(self) -> Result<Parameters<BE, P>>
+    where
+        Module<BE>: ModuleNew<BE>,
+    {
+        if P::EXPONENT > self.column_height() {
+            return Err(PirError::InvalidConfig {
+                reason: "payload digits must fit within one scheme column",
+            });
+        }
+        if let Collapse::Recursion { gamma0, .. } = self.collapse
+            && !gamma0.is_multiple_of(P::EXPONENT)
+        {
+            return Err(PirError::InvalidConfig {
+                reason: "Recursion gamma0 must be a whole number of payloads",
+            });
         }
         let module = Module::<BE>::new(self.n as u64);
-        Parameters {
+        Ok(Parameters {
             params: self,
             module,
-        }
+        })
     }
 }

@@ -71,6 +71,20 @@ The preset argument is a `DefaultPirParameters32B` name (run without arguments t
 
 The example pins the backend to the AVX-512-accelerated `FFT64Avx512` (`type BE = FFT64Avx512`), which only builds on an AVX-512F host. The crate is generic over the backend, so for a portable, dependency-free build you can swap that alias for `poulpy_cpu_avx::FFT64Avx` (AVX2/FMA) or the scalar reference backend `poulpy_cpu_ref::FFT64Ref` — at a performance cost.
 
+## Build portability
+
+The default crate build does not rely on repository-local `RUSTFLAGS`. CPU
+feature choices are explicit at the build/run site:
+
+- The always-available default build checks and documents on a normal Rust
+  stable toolchain using the scalar reference backend.
+- AVX2/FMA tests, benches, and example runs require `--features avx2-fhe` plus
+  `RUSTFLAGS="-C target-feature=+avx2,+fma"` on an AVX2/FMA host.
+- The `pir` example's AVX-512 backend requires `--features avx512-fhe` plus
+  `RUSTFLAGS="-C target-feature=+avx512f"` on an AVX-512F host.
+- Deployment builds may choose stronger host-specific flags such as
+  `RUSTFLAGS="-C target-cpu=native"` after validating the target fleet.
+
 ## Faster offline GEMM on wide-AVX-512 hosts (`cblas-gemm`)
 
 The offline mask product (`sum U·A`, the dominant `O(N·d)` phase) runs on a

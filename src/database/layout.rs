@@ -3,7 +3,10 @@ use std::marker::PhantomData;
 use poulpy_core::layouts::ModuleCoreAlloc;
 use poulpy_hal::layouts::{Backend, Module};
 
-use crate::payload::Payload;
+use crate::{
+    error::{PirError, Result},
+    payload::Payload,
+};
 
 use super::{address::Address, storage::Database};
 
@@ -27,12 +30,22 @@ impl<P: Payload> DatabaseLayout<P> {
     /// Raw coefficient matrix dimensions. `rows` and `cols` are coefficient counts,
     /// not scheme-specific batch/block counts.
     pub fn new(rows: usize, cols: usize) -> Self {
-        assert!(rows > 0 && cols > 0, "dimensions must be non-zero");
-        Self {
+        Self::try_new(rows, cols).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible constructor for service-facing code that should reject bad caller
+    /// input instead of panicking.
+    pub fn try_new(rows: usize, cols: usize) -> Result<Self> {
+        if rows == 0 || cols == 0 {
+            return Err(PirError::InvalidLayout {
+                reason: "dimensions must be non-zero",
+            });
+        }
+        Ok(Self {
             rows,
             cols,
             _payload: PhantomData,
-        }
+        })
     }
 
     /// Coefficient rows in the raw database matrix.
@@ -151,22 +164,27 @@ impl<P: Payload> DatabaseLayout<P> {
     /// `row_offset` is the payload's coefficient offset within the returned
     /// `column_height`-digit record.
     pub fn address_for(&self, i: usize, column_height: usize) -> Address {
-        assert!(
-            i < self.num_payloads(column_height),
-            "payload {i} out of bounds (num_payloads {})",
-            self.num_payloads(column_height)
-        );
+        self.try_address_for(i, column_height)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible payload-index resolver.
+    pub fn try_address_for(&self, i: usize, column_height: usize) -> Result<Address> {
+        let capacity = self.num_payloads(column_height);
+        if i >= capacity {
+            return Err(PirError::PayloadOutOfBounds { index: i, capacity });
+        }
         let ppc = self.payloads_per_column(column_height);
         let per_row = ppc * self.cols;
         let row = i / per_row;
         let e_local = i % per_row;
         let column = e_local % self.cols;
         let payload_in_column = e_local / self.cols;
-        Address {
+        Ok(Address {
             matrix: row,
             column,
             row_offset: payload_in_column * P::EXPONENT,
-        }
+        })
     }
 
     /// Compatibility wrapper for older call sites that passed `n`; address

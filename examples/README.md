@@ -8,8 +8,10 @@ The live-update ETH token-balance demo has moved to the adjacent
 Keyword PIR round trip: 16 M ETH addresses, each with a 64-byte record — the
 full address (zero-padded to 32 B) plus its full 256-bit token balance
 (little-endian) — retrieved with a **single PIR query** per lookup. The
-backend is `FFT64Avx` (AVX2/FMA) by default; add `--features avx512-fhe`
-(with `RUSTFLAGS="-C target-feature=+avx512f"`) to run it on `FFT64Avx512`.
+portable default backend is `FFT64Ref`; add `--features avx2-fhe` with
+`RUSTFLAGS="-C target-feature=+avx2,+fma"` to run it on `FFT64Avx`, or
+`--features avx512-fhe` with `RUSTFLAGS="-C target-feature=+avx512f"` to run it
+on `FFT64Avx512`.
 
 The server builds a minimal perfect hash function (MPHF, `poulpy_pir::keyword`
 — a pure `[u8; N] key ↔ index` layer) over the address set, and each record is

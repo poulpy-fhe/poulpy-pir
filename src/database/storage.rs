@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 use poulpy_core::layouts::ModuleCoreAlloc;
 use poulpy_hal::layouts::{Backend, Module};
 
+use crate::error::{PirError, Result};
 use crate::payload::{Payload, PayloadBlock};
 #[cfg(feature = "numa-db-interleave")]
 use crate::{numa, parallel::num_threads_setup};
@@ -261,21 +262,26 @@ impl<BE: Backend, P: Payload> Database<BE, P> {
 
     /// Resolve payload index `i` using this database's preprocessing layout.
     pub fn payload_address(&self, i: usize) -> Address {
+        self.try_payload_address(i)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible payload-index resolver for service-facing code.
+    pub fn try_payload_address(&self, i: usize) -> Result<Address> {
         let capacity = self.payload_capacity();
-        assert!(
-            i < capacity,
-            "payload {i} out of bounds (payload_capacity {capacity})"
-        );
+        if i >= capacity {
+            return Err(PirError::PayloadOutOfBounds { index: i, capacity });
+        }
         let payloads_per_grid_row = self.payloads_per_grid_row();
         let grid_row = i / payloads_per_grid_row;
         let e_local = i % payloads_per_grid_row;
         let column = e_local % self.cols;
         let payload_in_column = e_local / self.cols;
-        Address {
+        Ok(Address {
             matrix: grid_row,
             column,
             row_offset: payload_in_column * P::EXPONENT,
-        }
+        })
     }
 }
 
@@ -354,16 +360,21 @@ where
     /// matrix hands each worker a disjoint set of matrices whose coefficient
     /// writes never alias. The result is identical to a sequential scatter.
     pub fn encode_shard(&mut self, start: usize, payloads: &[P::Block]) {
+        self.try_encode_shard(start, payloads)
+            .unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    /// Fallible shard encoder for production callers.
+    pub fn try_encode_shard(&mut self, start: usize, payloads: &[P::Block]) -> Result<()> {
         let capacity = self.payload_capacity();
         let end = start
             .checked_add(payloads.len())
-            .expect("shard length overflow");
-        assert!(
-            end <= capacity,
-            "shard writes past the configured capacity ({capacity})"
-        );
+            .ok_or(PirError::ShardLengthOverflow)?;
+        if end > capacity {
+            return Err(PirError::ShardOutOfBounds { end, capacity });
+        }
         if payloads.is_empty() {
-            return;
+            return Ok(());
         }
 
         let n = self.n;
@@ -428,6 +439,7 @@ where
                 });
             }
         });
+        Ok(())
     }
 }
 
@@ -456,16 +468,40 @@ impl<BE: Backend<OwnedBuf = Vec<u8>>, P: Payload> Database<BE, P> {
         row_offset: usize,
         digits: &[i64],
     ) {
-        assert!(
-            row_offset + digits.len() <= self.column_height(),
-            "digit run overflows the record"
-        );
+        self.try_write_digits(column, grid_row, row_offset, digits)
+            .unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    /// Fallible raw digit writer.
+    pub fn try_write_digits(
+        &mut self,
+        column: usize,
+        grid_row: usize,
+        row_offset: usize,
+        digits: &[i64],
+    ) -> Result<()> {
+        let column_height = self.column_height();
+        let Some(end) = row_offset.checked_add(digits.len()) else {
+            return Err(PirError::DigitRunOutOfBounds {
+                offset: row_offset,
+                len: digits.len(),
+                column_height,
+            });
+        };
+        if end > column_height {
+            return Err(PirError::DigitRunOutOfBounds {
+                offset: row_offset,
+                len: digits.len(),
+                column_height,
+            });
+        }
         let (matrix_idx, row_out_base, col_in_block) =
             self.matrix_index_and_column(grid_row, column);
         let block = &mut self.matrices[matrix_idx];
         for (j, &v) in digits.iter().enumerate() {
             block.row_mut(row_out_base + row_offset + j)[col_in_block] = v as i16;
         }
+        Ok(())
     }
 
     /// Read raw `Z_p` digits from a logical record `(column, grid_row)`.
