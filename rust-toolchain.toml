@@ -1,0 +1,6 @@
+# poulpy-hal uses #![feature(trait_alias)], so building this crate requires a
+# nightly toolchain. Keep this pin in sync with poulpy's rust-toolchain.toml
+# and the Install Rust steps in .github/workflows/.
+[toolchain]
+channel = "nightly-2026-05-14"
+components = ["rustfmt", "clippy"]
