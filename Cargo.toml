@@ -4,27 +4,24 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-getrandom = "0.4"
+getrandom = "0.4.3"
 # Minimal perfect hashing for keyword PIR (`src/keyword`). `default-features =
 # false` drops the elias-fano / cacheline-ef packings, which the pinned
 # `KeywordIndex` instantiation does not use; `epserde` is what lets the server
 # serialize the MPHF parameters for the client to download.
 ptr_hash = { version = "2.0.2", default-features = false, features = ["epserde"] }
-epserde = "0.13"
+epserde = "0.13.1"
 private-gemm-x86 = { version = "=0.1.20", default-features = false }
-# Pinned: poulpy-pir is adapted to this exact poulpy commit. Pinning isolates it
-# from poulpy `main` drift; bump the rev deliberately when migrating to a newer
-# poulpy (and update poulpy-pir to match its API).
-poulpy-core = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed" }
-poulpy-hal = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed" }
-poulpy-cpu-ref = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed", features = ["enable-core"] }
-poulpy-cpu-avx = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed", features = ["enable-avx"] }
+poulpy-core = "0.7.0"
+poulpy-hal = "0.7.0"
+poulpy-cpu-ref = { version = "0.7.0", features = ["enable-core"] }
+poulpy-cpu-avx = { version = "0.7.0", features = ["enable-avx"] }
 # AVX-512 FHE backend (FFT64Avx512). Optional and never named in the library —
 # only the `pir` example (a run-site "binary") imports it, gated by the
 # `avx512-fhe` feature. `enable-avx512f` suffices (FFT64Avx512 needs only
 # AVX-512F). NOTE: this crate has a compile-time guard requiring
 # `RUSTFLAGS="-C target-feature=+avx512f"`, so it only *builds* on an AVX-512F host.
-poulpy-cpu-avx512 = { git = "https://github.com/poulpy-fhe/poulpy", rev = "f1dc3d4e04394ce9cba2aa396cc0fe19be4645ed", features = ["enable-avx512f"], optional = true }
+poulpy-cpu-avx512 = { version = "0.7.0", features = ["enable-avx512f"], optional = true }
 
 [features]
 # Pulls in the optional AVX-512 FHE backend for the `pir` example.

@@ -80,7 +80,7 @@ RUSTFLAGS="-C target-feature=+avx512f,+avx512dq" \
 cargo run --release --features "avx512-fhe,cblas-gemm,numa-db-interleave" --example pir -- InsPIRe2-g32-8GiB-c131072
 
 RUSTFLAGS="-C target-feature=+avx512f,+avx512dq" \
-cargo run --release --features "avx512-fhe,cblas-gemm,numa-db-interleave" --example pir -- InsPIRe2-g32-4GiB-c131072
+cargo run --release --features "avx512-fhe,cblas-gemm,numa-db-interleave" --example pir -- InsPIRe2-g32-4GiB-c65536
 
 RUSTFLAGS="-C target-feature=+avx512f,+avx512dq" \
 cargo run --release --features "avx512-fhe,cblas-gemm,numa-db-interleave" --example pir -- InsPIRe2-g32-2GiB-c65536
