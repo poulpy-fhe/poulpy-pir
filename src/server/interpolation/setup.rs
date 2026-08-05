@@ -80,7 +80,7 @@ where
         let scratch = ScratchOwned::<BE>::alloc(server_scratch_bytes(&params));
 
         Self {
-            params,
+            params: std::sync::Arc::new(params),
             layout,
             server_seed,
             database,
@@ -93,7 +93,7 @@ where
             precomputation: ServerPrecomputation::Interpolation(
                 InterpolationPrecomputation::default(),
             ),
-            gemm: Box::new(crate::server::PrivateGemmX86),
+            gemm: std::sync::Arc::new(crate::server::PrivateGemmX86),
             pack_scratch_bytes: std::sync::OnceLock::new(),
         }
     }

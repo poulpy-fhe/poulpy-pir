@@ -1,5 +1,6 @@
 //! Server construction and the fixed CRS query-mask expansion (SETUP).
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use poulpy_core::{
@@ -69,6 +70,10 @@ where
         );
         let t = layout.grid_rows_for(gamma0);
         assert_params_valid(&params, t, layout.cols());
+        // Shared (never mutated after this constructor) with any detached
+        // `PrecompContext`, which is what lets the precomputation run against a
+        // staging database without borrowing the live server.
+        let params = Arc::new(params);
         let module = params.module();
         let src_infos = src_infos_for(&params);
         let mask_infos = mask_regime_infos(&params);
@@ -141,15 +146,15 @@ where
             database,
             scratch,
             scratch_pool: Vec::new(),
-            collapse: ServerCollapse::Recursion(RecursionState {
+            collapse: ServerCollapse::Recursion(Arc::new(RecursionState {
                 src_infos,
                 key0_mask,
                 key1_mask,
                 q0_masks: Vec::new(),
                 q1_masks: Vec::new(),
-            }),
+            })),
             precomputation: ServerPrecomputation::Recursion(RecursionPrecomputation::default()),
-            gemm: Box::new(crate::server::PrivateGemmX86),
+            gemm: Arc::new(crate::server::PrivateGemmX86),
             pack_scratch_bytes: std::sync::OnceLock::new(),
         }
     }

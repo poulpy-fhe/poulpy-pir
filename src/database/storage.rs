@@ -93,6 +93,35 @@ pub struct Database<BE: Backend, P> {
 }
 
 impl<BE: Backend, P: Payload> Database<BE, P> {
+    /// A database with the right shape metadata but **no allocated matrices**.
+    ///
+    /// Used as a swap placeholder by a detached precomputation context, which
+    /// never owns a database: the caller's staging database is swapped in for
+    /// the duration of each precomputation and swapped back out afterwards, so
+    /// the shell it displaces must be free.
+    pub(crate) fn placeholder(
+        n: usize,
+        layout: DatabaseLayout<P>,
+        base2k: usize,
+        column_height: usize,
+    ) -> Self {
+        Self {
+            matrices: Vec::new(),
+            n,
+            base2k,
+            cols: layout.cols(),
+            grid_rows: layout.grid_rows_for(column_height),
+            physical_rows: 0,
+            preprocessing: DatabasePreprocessingConfig::new::<P>(column_height),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Bytes held by the coefficient matrices.
+    pub fn allocated_bytes(&self) -> usize {
+        self.matrices.iter().map(|m| size_of_val(m.flat())).sum()
+    }
+
     /// The flat list of `n x n` sub-matrices (`matrix · block_cols + block`).
     pub fn matrices(&self) -> &[CoeffMatrix] {
         &self.matrices

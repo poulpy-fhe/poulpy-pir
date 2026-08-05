@@ -258,6 +258,17 @@ impl<BE: Backend> PackingPrecomputations<BE> {
         }
     }
 
+    /// Bytes held by the backing buffers visited by
+    /// [`for_each_buffer`](Self::for_each_buffer).
+    pub(crate) fn allocated_bytes(&self) -> usize
+    where
+        BE::OwnedBuf: poulpy_hal::layouts::HostDataRef,
+    {
+        let mut total = 0;
+        self.for_each_buffer(|_, len| total += len);
+        total
+    }
+
     /// Number of baby keys expected by the online `key_g` BSGS pass.
     pub(crate) fn bsgs_baby_size(&self) -> usize {
         self.bsgs_baby_size

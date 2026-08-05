@@ -144,6 +144,15 @@ impl<'a> PreparedF64<'a> {
         }
     }
 
+    /// Bytes this value owns. A zero-copy view over a database panel owns
+    /// nothing and reports 0; only [`new`](Self::new) copies allocate.
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        match &self.values {
+            Cow::Owned(v) => size_of_val(v.as_slice()),
+            Cow::Borrowed(_) => 0,
+        }
+    }
+
     /// **Zero-copy view** over `matrix`'s contiguous panel — for the recursion DB,
     /// which already lives in `self.database`, so no second copy is materialized.
     pub(crate) fn from_matrix(matrix: &'a CoeffMatrix) -> Self {

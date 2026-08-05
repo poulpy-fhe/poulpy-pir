@@ -53,6 +53,45 @@ where
     /// matrices, and returns an ordered phase timing breakdown. Call once
     /// (re-run after a database update) before [`respond`](Self::respond_recursion).
     pub(crate) fn offline_recursion(&mut self) -> OfflineTimings {
+        let mut timings = self.offline_recursion_precompute();
+
+        // Warm the online per-worker scratch pool (plan M2′) so per-query packs
+        // reuse it instead of allocating. Sized by the offline worker count, so
+        // it is the single largest one-time allocation the server makes; it is
+        // deliberately *not* part of `offline_recursion_precompute`, which a
+        // detached `PrecompContext` runs and which answers no queries.
+        let started = Instant::now();
+        let bytes = self.scratch_for_pack();
+        let nthreads = num_threads_offline(usize::MAX);
+        while self.scratch_pool.len() < nthreads {
+            self.scratch_pool.push(ScratchOwned::<BE>::alloc(bytes));
+        }
+        timings.record_phase("recursion.online_scratch_warm", started.elapsed());
+
+        timings
+    }
+
+    /// Byte counts for this server's large allocations (InsPIRe² only).
+    ///
+    /// The pool figure is what the pool *currently* holds: it is empty until the
+    /// first [`offline`](Self::offline), and a detached
+    /// [`PrecompContext`](crate::server::PrecompContext) never fills it at all.
+    pub fn memory_report(&self) -> crate::server::ServerMemory {
+        let ServerPrecomputation::Recursion(precomputation) = &self.precomputation else {
+            panic!("memory_report is InsPIRe²-only (Collapse::Recursion)");
+        };
+        crate::server::ServerMemory {
+            database: self.database.allocated_bytes(),
+            precomputation: precomputation.allocated_bytes(),
+            online_scratch_pool: self.scratch_pool.len() * self.scratch_for_pack(),
+        }
+    }
+
+    /// The query-independent precomputation itself: everything
+    /// [`offline_recursion`](Self::offline_recursion) does except warming the
+    /// *online* scratch pool. This is what a detached
+    /// [`PrecompContext`](crate::server::PrecompContext) runs.
+    pub(crate) fn offline_recursion_precompute(&mut self) -> OfflineTimings {
         let mut timings = OfflineTimings::default();
         self.ensure_recursion_query_mask(&mut timings);
         let shape = self.recursion_offline_shape();
@@ -81,14 +120,6 @@ where
             }
         }
         timings.record_phase("recursion.numa_place", started.elapsed());
-
-        // Warm the online per-worker scratch pool (plan M2′) so per-query packs
-        // reuse it instead of allocating.
-        let bytes = self.scratch_for_pack();
-        let nthreads = num_threads_offline(usize::MAX);
-        while self.scratch_pool.len() < nthreads {
-            self.scratch_pool.push(ScratchOwned::<BE>::alloc(bytes));
-        }
 
         timings
     }

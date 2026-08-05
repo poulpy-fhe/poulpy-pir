@@ -53,6 +53,28 @@ pub struct RecursionPrecomputation<BE: Backend> {
     resp1_precompute: Vec<PackingPrecomputations<BE>>,
 }
 
+impl<BE: Backend> RecursionPrecomputation<BE> {
+    /// Bytes held by the precomputed mask-side buffers.
+    pub(crate) fn allocated_bytes(&self) -> usize
+    where
+        BE::OwnedBuf: poulpy_hal::layouts::HostDataRef,
+    {
+        let packing: usize = self
+            .l1_precompute
+            .iter()
+            .chain(&self.resp1_precompute)
+            .map(|p| p.allocated_bytes())
+            .sum();
+        let prepared: usize = self
+            .resp1_prep
+            .iter()
+            .flatten()
+            .map(|p| p.allocated_bytes())
+            .sum();
+        packing + prepared
+    }
+}
+
 impl<BE: Backend> Default for RecursionPrecomputation<BE> {
     fn default() -> Self {
         Self {
@@ -116,10 +138,21 @@ impl<BE: Backend, P: Payload> Server<BE, P> {
         state
     }
 
+    /// Mutable access to the InsPIRe² state.
+    ///
+    /// Only SETUP mutates it (the CRS query-mask expansion), and the state is
+    /// shared by `Arc` with any detached [`PrecompContext`]. Handing out a
+    /// context before SETUP has run would therefore be a bug — it is rejected
+    /// there, and this asserts the same invariant from the other side.
+    ///
+    /// [`PrecompContext`]: crate::server::PrecompContext
     fn recursion_state_mut(&mut self) -> &mut RecursionState<BE> {
         let ServerCollapse::Recursion(state) = &mut self.collapse else {
             panic!("InsPIRe² state requested for non-InsPIRe² server");
         };
-        state
+        std::sync::Arc::get_mut(state).expect(
+            "InsPIRe² SETUP state is shared with a live PrecompContext; run \
+             Server::generate_query_mask() before detaching one",
+        )
     }
 }

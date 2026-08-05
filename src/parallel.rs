@@ -77,13 +77,29 @@ fn env_threads(var: &str) -> Option<usize> {
         .filter(|&t| t >= 1)
 }
 
+/// Default ceiling on the auto-detected worker budget.
+///
+/// `available_parallelism` reports logical CPUs, which on an SMT host is twice
+/// the physical core count. Taking it at face value is the wrong default here,
+/// measured on a 64-core / 128-thread Granite Rapids host (c8i.32xlarge, 2 GiB
+/// shape): going from 64 to 128 workers bought 6% on the offline precompute
+/// (4.36 s -> 4.10 s) for 19% more CPU, while making the online response 10%
+/// *slower* (111 ms -> 122 ms) and — because the online scratch pool is sized by
+/// this budget — raising peak RSS from 24.1 GiB to 34.7 GiB.
+///
+/// A workload that genuinely wants the second hyperthread can still say so with
+/// `PIR_THREADS`, which is not capped.
+const DEFAULT_MAX_THREADS: usize = 64;
+
 /// The base worker budget: `PIR_THREADS` (if set and `>= 1`) overrides the
-/// detected logical-CPU count. Phase-specific budgets layer over this.
+/// detected logical-CPU count, which is otherwise clamped to
+/// [`DEFAULT_MAX_THREADS`]. Phase-specific budgets layer over this.
 fn base_threads() -> usize {
     env_threads("PIR_THREADS").unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(|x| x.get())
             .unwrap_or(1)
+            .min(DEFAULT_MAX_THREADS)
     })
 }
 

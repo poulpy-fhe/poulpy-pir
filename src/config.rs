@@ -839,7 +839,12 @@ where
     pub(crate) base2k: usize,
     pub(crate) k: usize,
     pub(crate) collapse: Collapse,
-    pub(crate) _phantom: PhantomData<P>,
+    /// `fn() -> P`, not `P`: the config only *names* a payload type, it never
+    /// owns a value of one. That keeps `Config` — and so `Parameters` — `Send +
+    /// Sync` unconditionally, which the `Arc<Parameters<..>>` shared with a
+    /// detached `PrecompContext` needs; `PhantomData<P>` would make it
+    /// conditional on `P: Send`.
+    pub(crate) _phantom: PhantomData<fn() -> P>,
 }
 
 impl<P> Copy for Config<P> where P: Payload {}
