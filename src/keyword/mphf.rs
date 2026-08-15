@@ -2,7 +2,6 @@
 
 use std::io::{Read, Result as IoResult, Write};
 
-use epserde::prelude::{Deserialize, Serialize};
 use ptr_hash::{PtrHash, PtrHashParams, bucket_fn::CubicEps, hash::Xxh3_128};
 
 use super::KeywordError;
@@ -129,10 +128,7 @@ impl<const N: usize> KeywordIndex<N> {
     /// `len()` without walking the structure.
     pub fn write_to<W: Write>(&self, writer: &mut W) -> IoResult<()> {
         writer.write_all(&(self.n as u64).to_le_bytes())?;
-        // SAFETY: `Phf` derives `Epserde`; serializing an owned, fully
-        // initialized value only reads its fields.
-        unsafe { self.phf.serialize(writer) }.map_err(std::io::Error::other)?;
-        Ok(())
+        self.phf.write_portable(writer)
     }
 
     /// Reads back a [`KeywordIndex`] written by [`write_to`](Self::write_to).
@@ -142,11 +138,7 @@ impl<const N: usize> KeywordIndex<N> {
     pub fn read_from<R: Read>(reader: &mut R) -> IoResult<Self> {
         let mut n = [0u8; 8];
         reader.read_exact(&mut n)?;
-        // SAFETY: the byte stream is trusted to have come from `write_to` of the
-        // same `Phf` instantiation; epserde validates its own type tag and
-        // rejects a mismatch.
-        let phf = unsafe { Phf::deserialize_full(reader) }
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let phf = Phf::read_portable(reader)?;
         Ok(Self {
             phf,
             n: u64::from_le_bytes(n) as usize,

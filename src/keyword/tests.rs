@@ -270,3 +270,30 @@ fn rebuild_threshold_tracks_the_delta() {
         "10 keys is far below the default threshold"
     );
 }
+
+/// The MPHF is built on a 64-bit server and evaluated on 32-bit wasm clients, so
+/// the key hash must not depend on the host's word size. It did: `Hash for
+/// [T]` prefixes the length via `write_usize`, which writes 8 bytes on x86-64
+/// and 4 on wasm32, so the same key hashed to different values and every index
+/// disagreed.
+///
+/// Pin the hash rather than an MPHF index — construction is parallel and not
+/// reproducible across runs, but this is, and it is the part that has to be
+/// portable.
+#[test]
+fn the_key_hash_does_not_depend_on_word_size() {
+    use ptr_hash::hash::{KeyHasher, Xxh3_128};
+
+    const GOLDEN: [u128; 3] = [
+        329742151411625726951160329755639952067,
+        56427818990099317979833982576654605952,
+        56427818990099317278857707775691644586,
+    ];
+
+    let got = [
+        <Xxh3_128 as KeyHasher<[u8; 20]>>::hash(&[0u8; 20], 0),
+        <Xxh3_128 as KeyHasher<[u8; 20]>>::hash(&[7u8; 20], 0),
+        <Xxh3_128 as KeyHasher<[u8; 20]>>::hash(&[7u8; 20], 42),
+    ];
+    assert_eq!(got, GOLDEN, "the key hash changed; every client must resync");
+}

@@ -27,15 +27,21 @@ include = [
     "benches/**",
 ]
 
+[workspace]
+exclude = ["vendor/ptr_hash"]
+
+# The MPHF's portable wire format lives in this fork; see vendor/ptr_hash/FORK.md.
+# A workspace that depends on this crate must repeat this patch — Cargo only
+# honours [patch] from the workspace root being built.
+[patch.crates-io]
+ptr_hash = { path = "vendor/ptr_hash" }
+
 [dependencies]
 getrandom = "0.4.3"
-# Minimal perfect hashing for keyword PIR (`src/keyword`). `default-features =
-# false` drops the elias-fano / cacheline-ef packings, which the pinned
-# `KeywordIndex` instantiation does not use; `epserde` is what lets the server
-# serialize the MPHF parameters for the client to download.
-ptr_hash = { version = "2.0.2", default-features = false, features = ["epserde"] }
-epserde = "0.13.1"
-private-gemm-x86 = { version = "=0.1.20", default-features = false }
+# Minimal perfect hashing for keyword PIR (`src/keyword`). The MPHF ships to
+# clients through `write_portable`, not epserde, so that a 64-bit server and a
+# 32-bit wasm client agree on the bytes.
+ptr_hash = { version = "2.0.2", default-features = false }
 poulpy-core = "0.7.0"
 poulpy-hal = "0.7.0"
 poulpy-cpu-ref = { version = "0.7.0", features = ["enable-core"] }
@@ -46,6 +52,10 @@ poulpy-cpu-avx = { version = "0.7.0", features = ["enable-avx"], optional = true
 # AVX-512F). NOTE: this crate has a compile-time guard requiring
 # `RUSTFLAGS="-C target-feature=+avx512f"`, so it only *builds* on an AVX-512F host.
 poulpy-cpu-avx512 = { version = "0.7.0", features = ["enable-avx512f"], optional = true }
+
+# Raw x86-64 assembly; target-gated so other targets build the portable fallback.
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+private-gemm-x86 = { version = "=0.1.20", default-features = false }
 
 [features]
 # Pulls in the optional AVX2/FMA FHE backend used by tests, benches, and the
@@ -110,7 +120,5 @@ name = "mask_product"
 path = "benches/mask_product/main.rs"
 harness = false
 
-[dev-dependencies]
-# Re-declared (also a normal dependency) so the self-contained `mask_product`
-# bench can drive the same f64 GEMM kernel the server uses.
+[target.'cfg(target_arch = "x86_64")'.dev-dependencies]
 private-gemm-x86 = { version = "=0.1.20", default-features = false }

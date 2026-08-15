@@ -230,6 +230,7 @@ impl Gemm for CblasDgemm {
 /// Picks the densest available x86 instruction set for the GEMM kernel. AVX2 is a
 /// hard requirement of the AVX backend this crate runs on, so `Avx256` is the
 /// floor; `Avx512` is selected at runtime when the CPU reports `avx512f`.
+#[cfg(target_arch = "x86_64")]
 fn gemm_instr_set() -> private_gemm_x86::InstrSet {
     #[cfg(target_arch = "x86_64")]
     {
@@ -244,6 +245,7 @@ fn gemm_instr_set() -> private_gemm_x86::InstrSet {
 /// matrices: `lhs` is `m x k`, `rhs` is `k x n`, `dst` is `m x n`. Uses the
 /// `private-gemm-x86` kernel (the same one faer dispatches to), with the
 /// instruction set auto-selected at runtime by [`gemm_instr_set`].
+#[cfg(target_arch = "x86_64")]
 fn gemm_f64_add(dst: &mut [f64], lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize) {
     assert_eq!(dst.len(), m * n, "dst must be m*n");
     assert_eq!(lhs.len(), m * k, "lhs must be m*k");
@@ -283,6 +285,27 @@ fn gemm_f64_add(dst: &mut [f64], lhs: &[f64], rhs: &[f64], m: usize, k: usize, n
             (&raw const alpha).cast(),
             1,
         );
+    }
+}
+
+/// Portable `dst += lhs · rhs`, so the crate builds for client-only targets.
+/// Correct but unoptimized; the server is only deployed on x86-64.
+#[cfg(not(target_arch = "x86_64"))]
+fn gemm_f64_add(dst: &mut [f64], lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize) {
+    assert_eq!(dst.len(), m * n, "dst must be m*n");
+    assert_eq!(lhs.len(), m * k, "lhs must be m*k");
+    assert_eq!(rhs.len(), k * n, "rhs must be k*n");
+
+    for i in 0..m {
+        for p in 0..k {
+            let a = lhs[i * k + p];
+            if a == 0.0 {
+                continue;
+            }
+            for j in 0..n {
+                dst[i * n + j] += a * rhs[p * n + j];
+            }
+        }
     }
 }
 
